@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Jev</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" width="20" height="20" />
+    <h1>Jev</h1>
+    <span id="status" class="status"></span>
+    <button id="settingsBtn" class="icon" title="Settings" aria-label="Settings">⚙</button>
+  </header>
+
+  <section id="settings" hidden>
+    <label>TypeSafe API key
+      <input id="apiKey" type="password" placeholder="ts-…" autocomplete="off" />
+    </label>
+    <div class="row">
+      <label>Model <input id="model" type="text" /></label>
+      <label>Max steps <input id="maxSteps" type="number" min="1" max="100" /></label>
+    </div>
+    <div class="row">
+      <label>Min confidence <input id="minConfidence" type="number" min="0" max="1" step="0.05" /></label>
+      <label>API base <input id="apiBase" type="text" /></label>
+    </div>
+    <label class="check"><input id="confirmRisky" type="checkbox" /> Ask me before risky actions (orders, deletes, sending)</label>
+    <div class="row end">
+      <a href="https://console.typesafe.ai" target="_blank">Get a key</a>
+      <button id="saveSettings">Save</button>
+    </div>
+  </section>
+
+  <form id="promptForm">
+    <textarea id="prompt" rows="3" placeholder="What should Jev do on this page? e.g. search for &quot;mechanical keyboards&quot; and open the first result"></textarea>
+    <div class="row end">
+      <span class="hint">⌘/Ctrl + Enter</span>
+      <button type="button" id="stopBtn" class="secondary" hidden>Stop</button>
+      <button type="submit" id="runBtn">Run</button>
+    </div>
+  </form>
+
+  <div id="confirm" class="confirm-box" hidden>
+    <p><strong>Allow this action?</strong> <span id="confirmText"></span></p>
+    <div class="row end">
+      <button id="denyBtn" class="secondary">Cancel</button>
+      <button id="approveBtn">Allow</button>
+    </div>
+  </div>
+
+  <div id="answer" class="answer-card" hidden>
+    <div class="answer-head">
+      <span class="answer-label">Answer</span>
+      <button id="copyBtn" class="secondary small" title="Copy the answer">Copy</button>
+    </div>
+    <div id="answerText" class="answer-text"></div>
+    <div id="answerNote" class="answer-note"></div>
+    <ol id="answerItems" class="answer-items"></ol>
+  </div>
+
+  <ol id="log" class="log"></ol>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
