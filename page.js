@@ -45,6 +45,21 @@ export function snapshotPage(maxElements, textChars) {
       if (t.trim()) return t;
     }
     if (el.labels && el.labels[0]) return el.labels[0].innerText;
+    for (const attr of ["data-tooltip", "data-original-title", "data-title", "tooltip", "data-tip", "data-label", "data-name", "data-command", "data-id"]) {
+      const v = el.getAttribute(attr);
+      if (v && /[a-z]/i.test(v)) return v;
+    }
+    const desc = el.getAttribute("aria-describedby");
+    if (desc) {
+      const t = desc.split(/\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" ");
+      if (t.trim()) return t;
+    }
+    const svgTitle = el.querySelector("svg title");
+    if (svgTitle && svgTitle.textContent.trim()) return svgTitle.textContent;
+    // Icon sprites often name the command: <use href="#svg-icon-extrude-button">
+    const use = el.querySelector("use");
+    const href = use && (use.getAttribute("href") || use.getAttribute("xlink:href"));
+    if (href) return href.replace(/^.*#/, "").replace(/(^svg-?|icon-?|-?button$)/gi, "").replace(/[-_]+/g, " ").trim();
     return "";
   };
 
@@ -122,6 +137,13 @@ export function snapshotPage(maxElements, textChars) {
     atTop: scrollY <= 2,
     atBottom: innerHeight + scrollY >= document.documentElement.scrollHeight - 2,
   };
+}
+
+// Readable page text (keeps line breaks) for the text model.
+export function pageText(maxChars) {
+  const raw = (document.body && document.body.innerText) || "";
+  const text = raw.replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n\n").trim().slice(0, maxChars);
+  return { url: location.href, title: document.title, text };
 }
 
 // Outline the elements an answer refers to, so you can check it on the page.

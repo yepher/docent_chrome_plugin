@@ -10,6 +10,77 @@ Click the toolbar icon (or press **Alt+J**), type what you want done on the curr
 
 No build step or dependencies are needed.
 
+## Side panel and right-click
+
+- **◨** in the popup header moves Jev into Chrome's side panel, which stays open while you click around the page. To make the toolbar icon always open the panel, set *Toolbar icon opens → Side panel* in ⚙.
+- Select text on any page, right-click, and choose **Ask Jev about "…"**. The side panel opens with the selection attached (shown as a chip above the prompt; ✕ removes it). Questions are then answered from the selection instead of the whole page. For example, "is this a good price?" gets a yes/no from the selection, "explain this" uses the text model, and "search for this" types the selection. **Ask Jev about this page** opens the panel without a selection.
+
+## Find, hide and dim by meaning
+
+Prompts like *"highlight reviews that mention battery life"*, *"hide sponsored results"* or *"dim posts about politics"* are recognised as find/hide requests:
+
+1. `items.js` splits the page into items: groups of three or more same-shaped siblings with real text, such as search results, posts, comments, products and table rows. Navigation, header and footer groups are down-weighted. Pages without repeated blocks fall back to paragraphs and list items.
+2. Each item gets one Jev Noul: "does this item match what the request describes?", sent in batches of 120. Answers are cached by item text, so re-renders cost nothing.
+3. Matches (≥ 50%) are outlined, hidden or dimmed (dimmed items come back on hover). Items at 30–50% are listed as borderline and left alone.
+
+The Answer card lists the matches. Click one, or use ◀ ▶, to scroll to it. **Clear highlights / Show hidden** undoes it. **Save as rule for <site>** keeps it: saved rules re-apply whenever a page on that site loads, and to new items as they appear (infinite scroll or app updates, via a MutationObserver). Only the new items are checked. The toolbar badge shows how many items rules hid or dimmed on the current tab. Rules for the current site are listed under the log, where you can switch each one off or delete it.
+
+## Site skills: Onshape
+
+Some web apps can't be driven through the page's HTML. In Onshape the toolbar is icons, the 3D view is a WebGL canvas, and a feature is a multi-step dialog, so the generic agent has nothing it can reliably click. For those sites the extension uses a **site skill**: a module that knows the app and works through the app's own API with your logged-in session, the same way your FeatureScript Exporter reads documents.
+
+`skill_onshape.js` takes over on any `cad.onshape.com/documents/…/w/…/e/…` tab when the prompt is a modelling request:
+
+```mermaid
+flowchart LR
+  R[Prompt] --> J{Jev: what shape?}
+  J -->|cube / box / cylinder / hole| P1[Jev picks each dimension<br/>from the numbers in the prompt]
+  J -->|complex| L[Text model writes a JSON plan<br/>code validates it]
+  L --> V{Jev: does the plan<br/>match the request?}
+  V -->|unsure| C[Ask you to confirm]
+  V -->|yes| B
+  C --> B
+  P1 --> B[POST features to the Part Studio<br/>sketch + extrude, or the std cube]
+  J -->|not modelling| G[Generic agent]
+  B --> U[Onshape re-renders · Undo button removes them]
+```
+
+- **Jev alone** handles a cube, box, cylinder or through-hole. It chooses the shape, and for each dimension it picks one of the numbers in your prompt (e.g. "60x40x20 mm" or "⌀20 mm, 40 mm tall"), or "not given", which falls back to a stated default.
+- **Anything more complex** ("a 60×40×20 block with four 5 mm holes 8 mm from the corners") needs the text model. It writes a plan in a small typed vocabulary: boxes, cubes and cylinders on the Top, Front or Right plane, as new, add or remove operations, sized in mm. Code validates the plan, Jev checks it matches your request, and if Jev is under 50% sure you're asked to confirm the plan first.
+- Each operation becomes a sketch (rectangle or circle) plus an extrude, or the standard cube feature. If Onshape reports an error, everything added in that run is deleted again. **Remove what Jev added** in the Answer card deletes the features afterwards; Onshape's own undo works too.
+- Requests that aren't about geometry ("share this with Bob") go to the generic agent.
+
+The generic agent also reads better labels for icon-only buttons now: tooltips, `data-*` titles, SVG titles and icon sprite names such as `#svg-icon-extrude-button`.
+
+## Playing chess
+
+The generic agent can't play chess. The pieces aren't buttons, and a game never finishes after one click (the first try clicked "Play as White" and reported done). So prompts that mention chess hand off to `skill_chess.js` once a board with your colour at the bottom is on the page. Before that, the normal agent handles setup, e.g. clicking "Play as Black".
+
+Each move, code stays in control and Jev makes one decision:
+
+1. **Read the position.** The skill uses a chess.js instance if the page has one (read from the page's own JavaScript). Otherwise it reads the board's `data-square` / `data-piece` markup (chessboard.js).
+2. **Annotate every legal move in code** using a vendored copy of chess.js (`vendor/chess.mjs`, BSD-2): captures, checks, checkmate, promotion, "allows checkmate next move", and an estimate of material won or hung one move deep.
+3. **Play a mate in one if there is one.** Drop moves that allow mate, and keep only moves within a pawn of the best material outcome.
+4. **Jev picks.** One Choice over the remaining moves: "which is the strongest move for White here?". The state is the FEN, a piece list and recent moves, and each option carries its annotation. The log shows the move, its confidence and the runners-up.
+5. **Make the move** by clicking the two squares, falling back to a mouse drag. Then wait for the opponent's reply (up to 2 minutes) and repeat until checkmate or a draw.
+
+Tested end to end on jevfish.patebryant.com. It plays a full game, and its strength depends on Jev's choices plus one move of lookahead. It isn't meant for rated play on chess.com or lichess, where engine help breaks their fair-play rules, and it doesn't read their boards.
+
+The generic agent also gained a **wait** action (the page is updating, or it's the other side's turn), and "done" now means an ongoing activity has actually finished.
+
+## Text model (optional, LiveKit Inference)
+
+Jev picks; it doesn't write. For text that isn't in your prompt, the extension can call an LLM through [LiveKit Inference](https://docs.livekit.io/agents/models/). In ⚙ → *Text model*, enter your LiveKit project URL, API key and secret, then choose a model (↻ loads the list from the gateway; you can also type any `provider/model` id). **Test text model** sends a one-word request and shows the reply and latency.
+
+It's used in two places, and only when Jev asks for it:
+
+- **Typing:** the `text` Choice gets a `compose` option ("the text isn't in the goal and has to be written"). If Jev picks it, the model writes the field's text from your goal, the page text and the field's label, e.g. *"reply to Ann saying I'll be there"*. The text it wrote is shown in the log. The usual risky-action check still runs before anything is sent.
+- **Open questions:** a new prompt kind, *explain* ("summarize this page", "what does this function do"), streams a written answer into the Answer card, labelled with the model that wrote it. A *lookup* that Jev can't find as a single item on the page also falls back to the model.
+
+Everything else (choosing actions, targets, yes/no, counts, lists) stays on Jev.
+
+**How auth works:** the extension mints a short-lived (10 min) LiveKit access token with an `inference.perform` grant, signed HS256 with your API secret, the same token the LiveKit Agents SDK uses. It calls the OpenAI-compatible gateway (`https://agent-gateway.livekit.cloud/v1`, or the staging gateway if your URL is `*.staging.livekit.cloud`) at `/chat/completions` with streaming, and at `/models`. The secret is kept in `chrome.storage.local`, which is **not encrypted**, so use a key from a LiveKit project you're comfortable using for this.
+
 ## Asking questions about the page
 
 The first request classifies the prompt: a **task**, or a question about the page (yes/no, count, list, or lookup). Questions skip the action loop, and the answer appears in a green **Answer** card in the popup, with a Copy button. Jev can't write an answer, so code builds one from its typed judgements:
@@ -57,15 +128,22 @@ The agent runs in the background service worker, so you can close the popup; reo
 
 | File | Role |
 | --- | --- |
-| `manifest.json` | MV3 manifest (activeTab, scripting, storage, tabs, `<all_urls>`) |
+| `manifest.json` | MV3 manifest (activeTab, scripting, storage, tabs, sidePanel, contextMenus, `<all_urls>`) |
 | `background.js` | Agent loop, question building, safety gate, run state |
 | `jev.js` | `/v1/systemone` client with retry/backoff on 429/529 |
+| `items.js` | Injected functions for find/hide: page segmentation, marking, jump-to, mutation watcher, selection |
+| `rules.js` | Per-item judging with cache, one-off find/hide, saved per-site rules and auto-apply |
+| `skill_onshape.js` | Onshape: plan (Jev, or text model + Jev check), build features through the Part Studio API with the session, undo |
+| `skill_chess.js` | Chess: read the position, annotate legal moves, Jev picks, click/drag the move, wait for the reply |
+| `vendor/chess.mjs` | chess.js 0.10.3 (BSD-2-Clause) with an ES-module export appended |
+| `lk.js` | LiveKit Inference client: token minting (WebCrypto HMAC), model list, streaming chat |
 | `page.js` | Injected functions: `snapshotPage` (element index) and `performAction` |
 | `candidates.js` | Text and URL candidate spans from the prompt |
-| `popup.*` | Prompt box, live log, confirm dialog, settings |
+| `popup.*` | Prompt box, live log, confirm dialog, answer card, site rules, settings. The same page is the side panel (`popup.html?panel=1`) |
 
 ## Limitations
 
-- It can't type text that isn't in your prompt, such as a reply it composes itself. That would need a generative LLM next to Jev.
+- Without a text model configured, it can't type text that isn't in your prompt, and it can't answer open questions.
 - It doesn't see inside iframes, shadow DOM or canvas, and it can't run on `chrome://` pages or the Chrome Web Store.
-- It sends the page's URL, title, the first ~1500 characters of visible text, and element labels to TypeSafe. Password values are never sent.
+- Saved rules send the text of each new page item (up to 400 characters each) to TypeSafe as pages on that site load and scroll.
+- It sends the page's URL, title, the first ~1500 characters of visible text, and element labels to TypeSafe. With a text model set up, it also sends up to ~16,000 characters of page text to LiveKit Inference when it writes text or answers an open question. Password values are never sent.

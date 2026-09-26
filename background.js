@@ -1,13 +1,20 @@
 // Agent loop. Code stays in control; Jev makes narrow, typed decisions each step:
 //   action   – which kind of step comes next (click / type / select / scroll / back / open URL / done)
 //   *_target – which indexed page element to act on
-//   text     – which span of the user's prompt to type (Jev doesn't generate text)
+//   text     – which span of the user's prompt to type (Jev doesn't generate text), or
+//              "compose", which hands the writing to the optional LiveKit Inference text model
 //   submit   – whether to press Enter after typing
 // All of these are asked together in one request per step (speculative fan-out).
 
 import { systemOne, choice, noul } from "./jev.js";
 import { textCandidates, urlCandidates } from "./candidates.js";
-import { snapshotPage, performAction, highlightElements } from "./page.js";
+import { snapshotPage, performAction, highlightElements, pageText } from "./page.js";
+import { chat, lkConfigured, DEFAULT_MODEL } from "./lk.js";
+import { focusRef, clearMarks, getSelectionText } from "./items.js";
+import { isChessGoal, colorFromGoal, readChessState, playChess } from "./skill_chess.js";
+import { Chess } from "./vendor/chess.mjs";
+import { onshapeContext, runOnshape, undoOnshape } from "./skill_onshape.js";
+import { modeFor, runFilter, applyRules, reapplyRules, getRules, saveRule, updateRule, deleteRule, forgetTab } from "./rules.js";
 
 export const DEFAULTS = {
   apiKey: "",
@@ -16,23 +23,67 @@ export const DEFAULTS = {
   maxSteps: 15,
   minConfidence: 0.3,
   confirmRisky: true,
+  // Optional text model via LiveKit Inference
+  lkUrl: "",
+  lkApiKey: "",
+  lkApiSecret: "",
+  lkModel: DEFAULT_MODEL,
+  lkInferenceUrl: "",
+  iconOpens: "popup", // or "panel"
 };
+const loadSettings = async () => ({ ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS))) });
 const MAX_ELEMENTS = 150;
 const PAGE_TEXT_CHARS = 1500;
 const NONE = "none";
+const COMPOSE = "compose";
 
 let run = null; // the one active (or last) run
 
 // ---------- messaging ----------
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg?.type) {
       case "jev:get":
         return publicRun();
       case "jev:start":
         if (run?.status === "running" || run?.status === "confirm") return { error: "A task is already running." };
-        startRun(msg.goal, msg.tabId);
+        startRun(msg.goal, msg.tabId, msg.selection || "");
         return publicRun();
+      case "jev:focus":
+        return { ok: await inject(msg.tabId, focusRef, [msg.ref.attr, msg.ref.val]).catch(() => false) };
+      case "jev:clearMarks":
+        return { cleared: await inject(msg.tabId, clearMarks, [msg.mode || null]).catch(() => 0) };
+      case "jev:rules":
+        return { rules: await getRules() };
+      case "jev:saveRule": {
+        const rules = await saveRule(msg.rule);
+        if (msg.tabId) applyRules(await loadSettings(), msg.tabId, true).catch(() => {});
+        return { rules };
+      }
+      case "jev:updateRule": {
+        const rules = await updateRule(msg.id, msg.patch);
+        if (msg.tabId) await reapplyRules(await loadSettings(), msg.tabId).catch(() => {});
+        return { rules };
+      }
+      case "jev:deleteRule": {
+        const rules = await deleteRule(msg.id);
+        if (msg.tabId) await reapplyRules(await loadSettings(), msg.tabId).catch(() => {});
+        return { rules };
+      }
+      case "jev:undoSkill": {
+        const u = run?.answer?.undo;
+        if (!u) return { removed: 0 };
+        if (u.kind === "onshape") {
+          const removed = await undoOnshape((func, args) => inject(u.tabId, func, args), u);
+          run.answer.undo = null;
+          log("info", `Removed ${removed} feature${removed === 1 ? "" : "s"} Jev added.`);
+          return { removed };
+        }
+        return { removed: 0 };
+      }
+      case "jev:mutated":
+        if (sender.tab?.id != null) applyRules(await loadSettings(), sender.tab.id, true).catch(() => {});
+        return { ok: true };
       case "jev:stop":
         if (run) { run.abort.abort(); run.confirm?.(false); finish("stopped", "Stopped by you."); }
         return publicRun();
@@ -49,8 +100,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 function publicRun() {
   if (!run) return { run: null };
-  const { goal, tabId, status, log, pending, step, answer } = run;
-  return { run: { goal, tabId, status, log, pending, step, answer } };
+  const { goal, tabId, status, log, pending, step, answer, selection } = run;
+  return { run: { goal, tabId, status, log, pending, step, answer, selection: selection ? selection.slice(0, 300) : "" } };
 }
 
 function publish() {
@@ -76,8 +127,8 @@ function finish(status, text) {
 }
 
 // ---------- the loop ----------
-async function startRun(goal, tabId) {
-  run = { goal, tabId, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
+async function startRun(goal, tabId, selection) {
+  run = { goal, tabId, selection, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
   // Extension API calls keep the MV3 service worker alive during long waits (e.g. confirmation).
   run.keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   publish();
@@ -90,27 +141,68 @@ async function startRun(goal, tabId) {
 }
 
 async function agentLoop(r) {
-  const s = { ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS))) };
+  const s = await loadSettings();
   if (!s.apiKey) throw new Error("No TypeSafe API key. Open Settings in the popup and paste your key.");
   const ask = (state, questions) =>
     systemOne({ apiBase: s.apiBase, apiKey: s.apiKey, model: s.model, state, questions, signal: r.abort.signal });
 
-  const texts = textCandidates(r.goal);
+  // Selected text (from the right-click menu) is the likeliest thing to type.
+  const texts = [...new Set([...(r.selection ? [r.selection.slice(0, 500)] : []), ...textCandidates(r.goal)])].slice(0, 250);
   const urls = urlCandidates(r.goal);
   const history = []; // human-readable, fed back to Jev
   const keys = [];    // for loop detection
   let scrolls = 0;
 
-  log("info", `Goal: ${r.goal}`);
+  log("info", `Goal: ${r.goal}`, r.selection ? `with selected text: "${r.selection.slice(0, 100)}${r.selection.length > 100 ? "…" : ""}"` : undefined);
 
   // Is this a question about the page, or something to do?
   await settle(r.tabId);
-  const kind = await classifyPrompt(r, ask);
-  if (kind !== "task") return answerQuestion(r, ask, kind);
+  const llm = lkConfigured(s) ? s : null;
+  const kind = await classifyPrompt(r, ask, llm);
+  if (kind !== "task") return answerQuestion(r, ask, kind, llm, s);
+
+  // Site skills: apps the generic DOM agent can't operate (canvas UIs, dialogs) get a
+  // purpose-built skill that works through the app's own API.
+  const tab = await chrome.tabs.get(r.tabId);
+  if (onshapeContext(tab.url)) {
+    log("info", "Onshape document detected: using the Onshape skill (builds features through Onshape's API).");
+    const res = await runOnshape({
+      tabId: r.tabId, url: tab.url, goal: r.goal, signal: r.abort.signal, ask, llm,
+      log: (k, t, d) => log(k, t, d),
+      inject: (func, args) => inject(r.tabId, func, args),
+      confirm: (label) => askUser(r, label),
+    });
+    if (res) {
+      if (res.answer) r.answer = res.answer;
+      return finish(res.status, res.text);
+    }
+    log("info", "Not a modelling request; handing over to the general agent.");
+  }
+
+  const chessGoal = isChessGoal(r.goal);
+  let waits = 0;
 
   for (r.step = 1; r.step <= s.maxSteps; r.step++) {
     if (r.abort.signal.aborted) return;
     await settle(r.tabId);
+
+    // Chess: once there's a playable board with our colour at the bottom, the chess skill takes over.
+    if (chessGoal) {
+      const st = await injectMain(r.tabId, readChessState, []).catch(() => null);
+      if (st) {
+        const want = colorFromGoal(r.goal) || st.orientation || "w";
+        const over = st.fen ? new Chess(st.fen).game_over() : false;
+        if (!over && (!st.orientation || st.orientation === want)) {
+          const res = await playChess({
+            tabId: r.tabId, goal: r.goal, signal: r.abort.signal, ask,
+            log: (k, t, d) => log(k, t, d),
+            injectMain: (func, args) => injectMain(r.tabId, func, args),
+          }, want);
+          if (res.status === "done") r.answer = { text: res.text, note: "Game over.", items: [] };
+          return finish(res.status, res.text);
+        }
+      }
+    }
 
     let snap;
     try {
@@ -127,18 +219,24 @@ async function agentLoop(r) {
     // --- action options (only the ones possible right now) ---
     const actions = {};
     if (clickables.length) actions.click = "Click a link, button, tab, checkbox or other clickable element listed in `page_elements`";
-    if (fields.length && texts.length) actions.type = "Type text from the goal into a text field or search box listed in `page_elements`";
+    if (fields.length && (texts.length || llm)) {
+      actions.type = llm
+        ? "Type text into a text field, search box or message box listed in `page_elements` (text from the goal, or text that needs to be written)"
+        : "Type text from the goal into a text field or search box listed in `page_elements`";
+    }
     if (selects.length) actions.select = "Choose an option in a dropdown listed in `page_elements`";
     if (!snap.atBottom) actions.scroll_down = "Scroll down, because the element needed next is not in `page_elements` yet";
     if (!snap.atTop) actions.scroll_up = "Scroll up to find an element above the current view";
     if (history.length) actions.go_back = "Go back to the previous page because the last step led somewhere wrong";
     if (urls.length) actions.open_url = "Open a web address that is written in the goal, because we are not on that site yet";
-    actions.done = "The goal is already fully accomplished, judging by `actions_taken_so_far` and `current_page`";
+    actions.wait = "Wait a few seconds, because the page is still loading or updating, or the other side is taking its turn";
+    actions.done = "The goal is fully accomplished and nothing is left to do, judging by `actions_taken_so_far` and `current_page`. For an ongoing activity such as playing a game, it is done only when the activity has finished";
 
     const state = {
       goal: r.goal,
       actions_taken_so_far: history.length ? history : "none yet",
       current_page: { url: snap.url, title: snap.title, visible_text: snap.text },
+      ...(r.selection ? { selected_text: r.selection.slice(0, 1500) } : {}),
       page_elements: snap.elements.map((e) => `${e.id}: ${e.desc}`),
     };
     const targetQ = (verb, list) =>
@@ -156,9 +254,12 @@ async function agentLoop(r) {
     if (actions.click) questions.click_target = targetQ("clicked", clickables);
     if (actions.type) {
       questions.type_target = targetQ("typed into", fields);
+      const textOptions = Object.fromEntries(texts.map((t) => [t, null]));
+      if (llm) textOptions[COMPOSE] = "The text isn't written in the goal and has to be composed, for example a reply, message, comment, review, description or answer";
+      textOptions[NONE] = "The goal doesn't say what text to type";
       questions.text = choice(
         "Which exact text should be typed into the field to make progress toward the `goal`? Pick just the text itself, without instruction words like 'search for' or 'type'.",
-        { ...Object.fromEntries(texts.map((t) => [t, null])), [NONE]: "The goal doesn't say what text to type" }
+        textOptions
       );
       questions.submit = noul("After typing the text, should Enter be pressed to submit it, for example to run a search or send the form?");
     }
@@ -199,12 +300,20 @@ async function agentLoop(r) {
         const t = pickTarget("type_target", "type into");
         if (t.err) return finish("stopped", t.err);
         const tx = A.text;
-        if (!tx || tx.choice === NONE) return finish("stopped", "Couldn't tell what text to type. Put the exact text in quotes in your prompt.");
+        let text = tx?.choice, textConf = tx?.confidence ?? 1;
+        if (llm && (!tx || text === COMPOSE || text === NONE)) {
+          text = await composeText(r, llm, snap, t.el, history);
+          if (!text) return finish("stopped", "The text model returned nothing to type.");
+          textConf = 1;
+        } else if (!tx || text === NONE || text === COMPOSE) {
+          return finish("stopped", "Couldn't tell what text to type. Put the exact text in quotes in your prompt, or set up a text model in Settings.");
+        }
         const submit = (A.submit?.noul ?? 0) >= 0.5;
+        const shown = text.length > 80 ? text.slice(0, 77) + "…" : text;
         step = {
-          type: "type", id: t.el.id, text: tx.choice, submit,
-          label: `Type "${tx.choice}" into ${t.el.desc}${submit ? " and press Enter" : ""}`,
-          conf: Math.min(act.confidence, t.conf, tx.confidence),
+          type: "type", id: t.el.id, text, submit,
+          label: `Type "${shown}" into ${t.el.desc}${submit ? " and press Enter" : ""}`,
+          conf: Math.min(act.confidence, t.conf, textConf),
         };
         break;
       }
@@ -232,10 +341,17 @@ async function agentLoop(r) {
       case "go_back":
         step = { type: "go_back", label: "Go back", conf: act.confidence };
         break;
+      case "wait":
+        if (++waits > 10) return finish("stopped", "Waited too long for the page to change.");
+        log("info", "Waiting for the page…", `confidence ${pct(act.confidence)}`);
+        await sleep(2500);
+        r.step--; // waiting doesn't use up a step
+        continue;
       default:
         return finish("error", `Unexpected action ${act.choice}`);
     }
     if (step.type !== "scroll_down" && step.type !== "scroll_up") scrolls = 0;
+    waits = 0;
 
     // Loop guard: the same step three times means we're stuck.
     const key = `${snap.url}|${step.type}|${step.id ? els[step.id].desc : ""}|${step.text ?? step.value ?? step.url ?? ""}`;
@@ -293,13 +409,22 @@ const PROMPT_KINDS = {
   count: "A question asking how many of something there are on the current page",
   list: "A question asking which items or things on the current page match a description (there may be several)",
   lookup: "A question asking for one specific value, name, number or piece of text shown on the current page",
+  find: "A request to find, highlight or show where certain things are on the page, e.g. 'highlight reviews that mention battery life'",
+  hide: "A request to hide, remove, filter out, dim or fade certain things on the page, e.g. 'hide sponsored results'",
 };
 
-async function classifyPrompt(r, ask) {
+const EXPLAIN_KIND = "A request for a written answer about the current page: summarize, explain, describe, compare, translate, or an open question that isn't yes/no, a count, a list or one value";
+
+async function classifyPrompt(r, ask, llm) {
   const snap = await inject(r.tabId, snapshotPage, [60, 600]).catch(() => null);
+  const kinds = llm ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND } : PROMPT_KINDS;
   const res = await ask(
-    { user_prompt: r.goal, current_page: snap ? { url: snap.url, title: snap.title } : "unknown" },
-    { kind: choice("What kind of request is `user_prompt`?", PROMPT_KINDS) }
+    {
+      user_prompt: r.goal,
+      current_page: snap ? { url: snap.url, title: snap.title } : "unknown",
+      ...(r.selection ? { selected_text: r.selection.slice(0, 1000), note: "The prompt is about `selected_text`, which the user selected on the page" } : {}),
+    },
+    { kind: choice("What kind of request is `user_prompt`?", kinds) }
   );
   const a = res.answers.kind;
   log("info", `Understood as: ${a.choice.replace("_", "/")}`, `confidence ${pct(a.confidence)}`);
@@ -309,17 +434,28 @@ async function classifyPrompt(r, ask) {
 // Jev can't write an answer, so the answer is built in code from Jev's typed
 // judgements: a Noul for yes/no, one Noul per page item for count/list (the
 // docs' counting pattern: never ask the model to count), a Choice for lookup.
-async function answerQuestion(r, ask, kind) {
-  const snap = await inject(r.tabId, snapshotPage, [250, 4000]);
-  if (!snap) throw new Error("Couldn't read the page.");
-
-  // Items = interactive elements (with their link targets, which carry meaning)
-  // plus text lines that aren't already an element's label.
-  const names = new Set(snap.elements.map((e) => (e.name || "").toLowerCase()));
-  const items = snap.elements.map((e) => ({ id: e.id, text: e.name || e.desc, desc: e.desc }));
-  for (const line of snap.lines) {
-    if (items.length >= 250) break;
-    if (!names.has(line.toLowerCase())) items.push({ text: line, desc: `text "${line}"` });
+async function answerQuestion(r, ask, kind, llm, s) {
+  if (kind === "explain") return writtenAnswer(r, llm);
+  if (kind === "find" || kind === "hide") return filterAnswer(r, s, kind);
+  let snap, items;
+  if (r.selection) {
+    // Answer from the selection only: its lines, or its sentences if it's one paragraph.
+    const tab = await chrome.tabs.get(r.tabId);
+    let parts = r.selection.split(/\n+/).map((x) => x.replace(/\s+/g, " ").trim()).filter(Boolean);
+    if (parts.length < 3) parts = r.selection.replace(/\s+/g, " ").split(/(?<=[.!?])\s+/).filter(Boolean);
+    snap = { url: tab.url, title: tab.title, text: r.selection.slice(0, 4000) };
+    items = [...new Set(parts)].slice(0, 250).map((t) => ({ text: t, desc: `text "${t.slice(0, 300)}"` }));
+  } else {
+    snap = await inject(r.tabId, snapshotPage, [250, 4000]);
+    if (!snap) throw new Error("Couldn't read the page.");
+    // Items = interactive elements (with their link targets, which carry meaning)
+    // plus text lines that aren't already an element's label.
+    const names = new Set(snap.elements.map((e) => (e.name || "").toLowerCase()));
+    items = snap.elements.map((e) => ({ id: e.id, text: e.name || e.desc, desc: e.desc }));
+    for (const line of snap.lines) {
+      if (items.length >= 250) break;
+      if (!names.has(line.toLowerCase())) items.push({ text: line, desc: `text "${line}"` });
+    }
   }
   if (!items.length) return finish("stopped", "Couldn't find any text or elements on this page to answer from.");
   const page = { url: snap.url, title: snap.title };
@@ -327,8 +463,10 @@ async function answerQuestion(r, ask, kind) {
 
   if (kind === "yes_no") {
     const res = await ask(
-      { question: r.goal, current_page: { ...page, visible_text: snap.text } },
-      { yes: noul("Based on `current_page`, is the answer to `question` yes?") }
+      r.selection
+        ? { question: r.goal, current_page: page, selected_text: snap.text }
+        : { question: r.goal, current_page: { ...page, visible_text: snap.text } },
+      { yes: noul(r.selection ? "Based on `selected_text`, is the answer to `question` yes?" : "Based on `current_page`, is the answer to `question` yes?") }
     );
     const p = res.answers.yes.noul;
     answer = {
@@ -347,7 +485,10 @@ async function answerQuestion(r, ask, kind) {
       }
     );
     const a = res.answers.pick;
-    if (a.choice === NONE) {
+    if (a.choice === NONE && llm) {
+      log("info", "Jev found no single item that answers this; asking the text model.");
+      return writtenAnswer(r, llm);
+    } else if (a.choice === NONE) {
       answer = { text: "Not found on this page", note: `${pct(a.confidence)} sure`, items: [] };
     } else {
       const it = items[Number(a.choice)];
@@ -356,7 +497,7 @@ async function answerQuestion(r, ask, kind) {
       answer = {
         text: it.text,
         note: `${pct(a.confidence)} confident` + (alts.length ? `. Other candidates: ${alts.join("; ")}` : ""),
-        items: it.id ? [{ text: it.text, id: it.id }] : [],
+        items: [{ text: it.text, id: it.id, ref: it.id ? { attr: "data-jev-id", val: it.id } : undefined }],
       };
     }
   } else {
@@ -374,7 +515,10 @@ async function answerQuestion(r, ask, kind) {
     items.forEach((it, i) => {
       const p = res.answers[`i${i}`]?.noul ?? 0;
       const key = it.text.toLowerCase();
-      if (p >= 0.5 && !seen.has(key)) { seen.add(key); matched.push({ text: it.text, id: it.id, p }); }
+      if (p >= 0.5 && !seen.has(key)) {
+        seen.add(key);
+        matched.push({ text: it.text, id: it.id, p, ref: it.id ? { attr: "data-jev-id", val: it.id } : undefined });
+      }
       else if (p >= 0.3 && p < 0.5) unsure.push(it.text);
     });
     answer = {
@@ -391,7 +535,125 @@ async function answerQuestion(r, ask, kind) {
   finish("done", ids.length ? `Answered. Matches are outlined on the page for 8 seconds.` : "Answered.");
 }
 
+// Pause the run until you allow or cancel in the popup.
+async function askUser(r, label) {
+  r.status = "confirm";
+  r.pending = { label };
+  log("confirm", `Waiting for your OK: ${label}`);
+  const ok = await new Promise((resolve) => (r.confirm = resolve));
+  r.confirm = null;
+  r.pending = null;
+  if (!r.abort.signal.aborted) { r.status = "running"; publish(); }
+  return ok && !r.abort.signal.aborted;
+}
+
+// Find / hide / dim by meaning: one Noul per page item (see rules.js).
+async function filterAnswer(r, s, kind) {
+  const mode = modeFor(kind, r.goal);
+  log("info", mode === "highlight" ? "Checking each item on the page…" : `Checking which items to ${mode}…`);
+  const res = await runFilter(s, r.tabId, r.goal, mode, r.abort.signal);
+  if (!res.total) return finish("stopped", "Couldn't split this page into items to check.");
+  const verb = { highlight: "found", hide: "hidden", dim: "dimmed" }[mode];
+  r.answer = {
+    text: res.matches.length ? `${res.matches.length} ${verb}` : "No matches",
+    note: `Checked ${res.total} items on the page.` +
+      (res.borderline.length ? ` Borderline, left alone: ${res.borderline.slice(0, 5).map((b) => b.text.slice(0, 60)).join("; ")}` : ""),
+    items: res.matches.map((m) => ({ text: m.text.length > 140 ? m.text.slice(0, 137) + "…" : m.text, ref: { attr: "data-jev-item", val: m.k } })),
+    filter: { mode, prompt: r.goal, host: res.host, count: res.matches.length },
+  };
+  log("answer", r.answer.text, r.answer.note);
+  finish("done", mode === "highlight" ? "Matches are outlined on the page. Click one in the list to jump to it." : "Done. Use Undo to bring them back, or save this as a rule for the site.");
+}
+
+// ---------- text model (LiveKit Inference) ----------
+async function writtenAnswer(r, llm) {
+  const page = r.selection
+    ? { ...(await chrome.tabs.get(r.tabId)), text: r.selection.slice(0, 16000) }
+    : await inject(r.tabId, pageText, [16000]);
+  const model = llm.lkModel || DEFAULT_MODEL;
+  r.answer = { text: "", note: `Written by ${model} from the ${r.selection ? "selected" : "page"} text. Not checked by Jev.`, items: [], long: true };
+  log("info", `Asking ${model}…`);
+  let last = 0;
+  const text = await chat(llm, [
+    { role: "system", content: "You answer questions about the web page the user is looking at, using only the page content provided. Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the page doesn't contain the answer, say so." },
+    { role: "user", content: `Page title: ${page.title}\nURL: ${page.url}\n\n${r.selection ? "Text the user selected on the page" : "Page text"}:\n${page.text}\n\nQuestion: ${r.goal}` },
+  ], {
+    signal: r.abort.signal,
+    maxTokens: 1200,
+    onDelta: (t) => {
+      r.answer.text = t;
+      if (Date.now() - last > 150) { last = Date.now(); publish(); }
+    },
+  });
+  r.answer.text = text.trim() || "(the model returned nothing)";
+  log("answer", r.answer.text.length > 140 ? r.answer.text.slice(0, 137) + "…" : r.answer.text, r.answer.note);
+  finish("done", "Answered.");
+}
+
+async function composeText(r, llm, snap, field, history) {
+  const page = await inject(r.tabId, pageText, [8000]);
+  const model = llm.lkModel || DEFAULT_MODEL;
+  log("info", `Writing text for ${field.desc} with ${model}…`);
+  const out = await chat(llm, [
+    { role: "system", content: "You write the text for one field on a web page, on behalf of the user. Reply with only the exact text to put in the field: no quotes around it, no preamble, no explanation, no markdown." },
+    { role: "user", content: [
+      `The user's goal: ${r.goal}`,
+      `Page: ${snap.title} (${snap.url})`,
+      `The field to fill: ${field.desc}`,
+      history.length ? `Steps done so far:\n- ${history.join("\n- ")}` : "",
+      `Page text:\n${page.text}`,
+    ].filter(Boolean).join("\n\n") },
+  ], { signal: r.abort.signal, maxTokens: 800 });
+  const text = out.trim().replace(/^["“](.*)["”]$/s, "$1").trim();
+  if (text) log("info", `${model} wrote: "${text.length > 140 ? text.slice(0, 137) + "…" : text}"`);
+  return text;
+}
+
+// ---------- side panel, right-click menu, saved rules ----------
+async function applyIconBehavior() {
+  const { iconOpens } = await loadSettings();
+  const panel = iconOpens === "panel";
+  await chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: panel }).catch(() => {});
+  await chrome.action.setPopup({ popup: panel ? "" : "popup.html" });
+}
+applyIconBehavior();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.iconOpens) applyIconBehavior();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({ id: "jev-selection", title: "Ask Jev about \"%s\"", contexts: ["selection"] });
+    chrome.contextMenus.create({ id: "jev-page", title: "Ask Jev about this page", contexts: ["page"] });
+  });
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (!tab?.id) return;
+  // Must be called straight from the click (user gesture), before any await.
+  chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+  (async () => {
+    let selection = "";
+    if (info.menuItemId === "jev-selection") {
+      selection = (await inject(tab.id, getSelectionText).catch(() => "")) || info.selectionText || "";
+    }
+    await chrome.storage.session.set({ jevPending: { selection, tabId: tab.id, t: Date.now() } });
+  })();
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, info) => {
+  if (info.status !== "complete") return;
+  const s = await loadSettings();
+  applyRules(s, tabId, false).catch(() => {});
+});
+chrome.tabs.onRemoved.addListener((tabId) => forgetTab(tabId));
+
 // ---------- helpers ----------
+async function injectMain(tabId, func, args) {
+  const [res] = await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func, args });
+  return res?.result;
+}
+
 async function inject(tabId, func, args) {
   const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
   return res?.result;

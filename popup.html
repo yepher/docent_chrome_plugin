@@ -10,10 +10,12 @@
     <img src="icons/icon32.png" alt="" width="20" height="20" />
     <h1>Jev</h1>
     <span id="status" class="status"></span>
+    <button id="panelBtn" class="icon" title="Open in side panel" aria-label="Open in side panel">◨</button>
     <button id="settingsBtn" class="icon" title="Settings" aria-label="Settings">⚙</button>
   </header>
 
   <section id="settings" hidden>
+    <h2>Jev (TypeSafe)</h2>
     <label>TypeSafe API key
       <input id="apiKey" type="password" placeholder="ts-…" autocomplete="off" />
     </label>
@@ -26,13 +28,47 @@
       <label>API base <input id="apiBase" type="text" /></label>
     </div>
     <label class="check"><input id="confirmRisky" type="checkbox" /> Ask me before risky actions (orders, deletes, sending)</label>
+    <label>Toolbar icon opens
+      <select id="iconOpens"><option value="popup">Popup</option><option value="panel">Side panel</option></select>
+    </label>
+
+    <h2>Text model (LiveKit Inference) <span class="optional">optional</span></h2>
+    <p class="help">Writes text that isn't in your prompt (replies, messages) and answers open questions like "summarize this page".</p>
+    <label>LiveKit URL
+      <input id="lkUrl" type="text" placeholder="wss://your-project.livekit.cloud" autocomplete="off" />
+    </label>
+    <div class="row">
+      <label>API key <input id="lkApiKey" type="text" placeholder="API…" autocomplete="off" /></label>
+      <label>API secret <input id="lkApiSecret" type="password" autocomplete="off" /></label>
+    </div>
+    <label>Model
+      <div class="row tight">
+        <input id="lkModel" type="text" list="lkModels" placeholder="openai/gpt-4.1-mini" autocomplete="off" />
+        <button type="button" id="lkRefresh" class="secondary small" title="Load the model list from LiveKit">↻</button>
+      </div>
+      <datalist id="lkModels"></datalist>
+    </label>
+    <details>
+      <summary>Advanced</summary>
+      <label>Inference URL override <input id="lkInferenceUrl" type="text" placeholder="https://agent-gateway.livekit.cloud/v1" /></label>
+    </details>
+    <div class="row">
+      <button type="button" id="lkTest" class="secondary small">Test text model</button>
+      <span id="lkStatus" class="help"></span>
+    </div>
+
     <div class="row end">
-      <a href="https://console.typesafe.ai" target="_blank">Get a key</a>
+      <a href="https://console.typesafe.ai" target="_blank">Get a Jev key</a>
       <button id="saveSettings">Save</button>
     </div>
   </section>
 
   <form id="promptForm">
+    <div id="ctx" class="ctx" hidden>
+      <span class="ctx-label">Selected text</span>
+      <span id="ctxText" class="ctx-text"></span>
+      <button type="button" id="ctxClear" class="icon" title="Don't use the selection" aria-label="Remove selection">✕</button>
+    </div>
     <textarea id="prompt" rows="3" placeholder="What should Jev do on this page? e.g. search for &quot;mechanical keyboards&quot; and open the first result"></textarea>
     <div class="row end">
       <span class="hint">⌘/Ctrl + Enter</span>
@@ -57,9 +93,24 @@
     <div id="answerText" class="answer-text"></div>
     <div id="answerNote" class="answer-note"></div>
     <ol id="answerItems" class="answer-items"></ol>
+    <div id="answerActions" class="row" hidden>
+      <button type="button" id="prevBtn" class="secondary small" title="Previous match">◀</button>
+      <button type="button" id="nextBtn" class="secondary small" title="Next match">▶</button>
+      <button type="button" id="undoBtn" class="secondary small">Undo</button>
+      <button type="button" id="saveRuleBtn" class="small">Save as rule for this site</button>
+    </div>
+    <div id="skillActions" class="row" hidden>
+      <button type="button" id="skillUndoBtn" class="secondary small">Remove what Jev added</button>
+    </div>
   </div>
 
   <ol id="log" class="log"></ol>
+
+  <details id="rulesBox" class="rules" hidden>
+    <summary id="rulesSummary">Rules for this site</summary>
+    <p class="help">Applied automatically when pages on this site load or add content.</p>
+    <ul id="rulesList"></ul>
+  </details>
   <script src="popup.js" type="module"></script>
 </body>
 </html>
