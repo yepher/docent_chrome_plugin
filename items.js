@@ -4,8 +4,8 @@
 // Split the page into "items": repeated blocks such as search results, posts,
 // comments, products or table rows. Each item is tagged data-jev-item="<n>".
 // With onlyNew, returns just the items that weren't tagged before (infinite scroll).
-export function segmentItems(onlyNew, max) {
-  const MIN = 15, MAXLEN = 2500;
+export function segmentItems(onlyNew, max, maxLen) {
+  const MIN = 15, MAXLEN = maxLen || 2500;
   const squash = (s, n) => (s || "").replace(/\s+/g, " ").trim().slice(0, n);
   const sig = (el) =>
     el.tagName + "." + [...el.classList].filter((c) => !/\d{3,}|active|selected|hover|focus|open|expanded/i.test(c)).sort().join(".");
@@ -69,8 +69,20 @@ export function segmentItems(onlyNew, max) {
   const els = (onlyNew ? fresh : picked).slice();
   // Document order.
   els.sort((A, B) => (A.compareDocumentPosition(B) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+  // Where each item sits relative to what you're looking at.
+  const vh = innerHeight;
   const list = els
-    .map((el) => ({ k: el.getAttribute("data-jev-item"), text: squash(el.innerText || el.textContent, 400) }))
+    .map((el) => {
+      const r = el.getBoundingClientRect();
+      const shown = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+      return {
+        k: el.getAttribute("data-jev-item"),
+        text: squash(el.innerText || el.textContent, 400),
+        vis: r.height ? shown / Math.min(r.height, vh) : 0, // share of the item (or of the screen) visible
+        pos: r.bottom <= 0 ? "above" : r.top >= vh ? "below" : "on screen",
+        dist: Math.abs((r.top + r.bottom) / 2 - vh / 2),
+      };
+    })
     .filter((x) => x.text);
   return { url: location.href, host: location.host, title: document.title, items: list.slice(0, max) };
 }
@@ -134,6 +146,82 @@ export function watchMutations() {
   });
   window.__jevObserver.observe(document.body, { childList: true, subtree: true });
   return true;
+}
+
+// The post/item in the middle of the screen: what "the post I'm looking at" means.
+// Tries well-known post containers first (article, [data-urn], tweets, reddit posts),
+// then climbs from the element under the screen centre to the first ancestor that is
+// one of several siblings with real text (a list entry). Tags it data-jev-focus.
+export function focusedItem(minLen, maxLen) {
+  minLen = minLen || 150; maxLen = maxLen || 40000;
+  const HINT = "article,[role=article],[data-urn],[data-id^='urn:'],[data-testid*='post' i],[data-testid*='tweet' i],[data-testid='cellInnerDiv'],shreddit-post,[data-post-id],[data-item-id]";
+  const len = (el) => (el.textContent || "").replace(/\s+/g, " ").trim().length;
+  const ok = (el) => { const n = len(el); return n >= minLen && n <= maxLen; };
+  const pick = (el) => {
+    // Outermost well-known container that still fits (a post can nest another article).
+    let hinted = null;
+    for (let h = el.closest(HINT); h; h = h.parentElement && h.parentElement.closest(HINT)) if (ok(h)) hinted = h;
+    if (hinted) return hinted;
+    for (let a = el; a && a !== document.body && a.parentElement; a = a.parentElement) {
+      if (a.matches("main,[role=main],body,html")) break;
+      const sibs = [...a.parentElement.children].filter((c) => c !== a && !c.matches("script,style,template,noscript,link,meta") && c.getBoundingClientRect().height > 0 && len(c) > 100);
+      if (sibs.length && ok(a)) return a;
+    }
+    return null;
+  };
+  for (const fy of [0.4, 0.3, 0.55, 0.2, 0.7]) {
+    for (const fx of [0.4, 0.5, 0.3, 0.6]) {
+      const el = document.elementFromPoint(innerWidth * fx, innerHeight * fy);
+      if (!el || el === document.body || el === document.documentElement) continue;
+      const item = pick(el);
+      if (!item) continue;
+      // Its own attribute, so it doesn't interfere with find/hide items.
+      document.querySelectorAll("[data-jev-focus]").forEach((e) => e.removeAttribute("data-jev-focus"));
+      item.setAttribute("data-jev-focus", "1");
+      return { attr: "data-jev-focus", k: "1", text: (item.innerText || "").replace(/\s+/g, " ").trim().slice(0, 300) };
+    }
+  }
+  return null;
+}
+
+// Full text of one item, for reading aloud: expands "…see more" first and drops
+// UI chrome (Like / Comment / Follow, counts, timestamps).
+export async function readItem(k, attr) {
+  const el = document.querySelector(`[${attr || "data-jev-item"}="${k}"]`);
+  if (!el) return null;
+  const MORE = /^(…|\.{3})?\s*(see|show|read)?\s*more\s*(…)?$/i;
+  let clicked = 0;
+  for (const b of el.querySelectorAll("button, [role=button], a, span")) {
+    const t = (b.innerText || "").trim();
+    const aria = b.getAttribute("aria-label") || "";
+    if ((t && t.length < 20 && MORE.test(t)) || /see more|show more|read more/i.test(aria)) {
+      if (b.tagName === "A" && b.getAttribute("href") && !b.getAttribute("href").startsWith("#")) continue;
+      b.click();
+      clicked++;
+      if (clicked > 3) break;
+    }
+  }
+  if (clicked) await new Promise((r) => setTimeout(r, 400));
+  const UI = /^(like|comment|comments|repost|reposts|send|share|follow|following|reply|replies|save|more|see more|show more|…more|see translation|show translation|translate|edit|report|promoted|visible to anyone.*|view profile|connect|message|subscribe|load more comments?)$/i;
+  const COUNT = /^[\d,.]+\s*[kKmM]?\s*(reactions?|comments?|reposts?|likes?|views?|shares?|impressions?|followers?)?$/;
+  const TIME = /^(•\s*)?\d+\s*(s|m|h|d|w|mo|y|yr|min|hr)s?\b\s*(•.*)?$/i;
+  // Hide controls while reading the text, so "Like Comment Repost" etc. aren't part of it.
+  const hidden = [];
+  for (const c of el.querySelectorAll("button, [role=button], [role=toolbar], select, svg, img, video, [aria-hidden=true], .visually-hidden, .sr-only")) {
+    hidden.push([c, c.style.display]);
+    c.style.setProperty("display", "none", "important");
+  }
+  const raw = el.innerText || "";
+  for (const [c, d] of hidden) c.style.display = d;
+  const lines = [];
+  for (let line of raw.split(/\n+/)) {
+    line = line.replace(/\s*•\s*(1st|2nd|3rd\+?|Following|Verified|Premium)(?![\w+])/gi, "");
+    line = line.replace(/\s+/g, " ").trim();
+    if (!line || UI.test(line) || COUNT.test(line) || TIME.test(line) || /^•\s*(1st|2nd|3rd\+?)$/.test(line)) continue;
+    if (lines[lines.length - 1] === line) continue;
+    lines.push(line);
+  }
+  return { text: lines.join("\n"), first: lines[0] || "", expanded: clicked > 0 };
 }
 
 // The current text selection, if any.

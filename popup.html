@@ -43,10 +43,10 @@
     </div>
     <label>Model
       <div class="row tight">
-        <input id="lkModel" type="text" list="lkModels" placeholder="openai/gpt-4.1-mini" autocomplete="off" />
+        <select id="lkModel"></select>
         <button type="button" id="lkRefresh" class="secondary small" title="Load the model list from LiveKit">↻</button>
       </div>
-      <datalist id="lkModels"></datalist>
+      <input id="lkModelCustom" type="text" placeholder="provider/model, e.g. openai/gpt-4.1-mini" autocomplete="off" hidden />
     </label>
     <details>
       <summary>Advanced</summary>
@@ -56,6 +56,18 @@
       <button type="button" id="lkTest" class="secondary small">Test text model</button>
       <span id="lkStatus" class="help"></span>
     </div>
+
+    <h2>Voice (LiveKit Inference) <span class="optional">uses the LiveKit key above</span></h2>
+    <label>Voice
+      <div class="row tight">
+        <select id="ttsVoice"></select>
+        <button type="button" id="ttsPreview" class="secondary small" title="Hear this voice">▶</button>
+      </div>
+      <input id="ttsVoiceCustom" type="text" placeholder="provider/model:voice, e.g. cartesia/sonic-3:&lt;voice id&gt;" autocomplete="off" hidden />
+    </label>
+    <label>Speech-to-text model <select id="sttModel"></select></label>
+    <label class="check"><input id="speakAnswers" type="checkbox" /> Always speak answers aloud</label>
+    <p class="help">Answers are spoken automatically when you ask with the 🎤 or say "tell me" / "read it out". 🔊 reads the page (or your selection) aloud.</p>
 
     <div class="row end">
       <a href="https://console.typesafe.ai" target="_blank">Get a Jev key</a>
@@ -72,10 +84,18 @@
     <textarea id="prompt" rows="3" placeholder="What should Jev do on this page? e.g. search for &quot;mechanical keyboards&quot; and open the first result"></textarea>
     <div class="row end">
       <span class="hint">⌘/Ctrl + Enter</span>
+      <button type="button" id="readBtn" class="secondary icon-btn" title="Read this page aloud" aria-label="Read this page aloud">🔊</button>
+      <button type="button" id="micBtn" class="secondary icon-btn" title="Ask by voice" aria-label="Ask by voice">🎤</button>
       <button type="button" id="stopBtn" class="secondary" hidden>Stop</button>
       <button type="submit" id="runBtn">Run</button>
     </div>
   </form>
+
+  <div id="voiceBar" class="voice-bar" hidden>
+    <span id="voiceDot" class="voice-dot"></span>
+    <span id="voiceText">Speaking…</span>
+    <button type="button" id="voiceStop" class="secondary small">■ Stop</button>
+  </div>
 
   <div id="confirm" class="confirm-box" hidden>
     <p><strong>Allow this action?</strong> <span id="confirmText"></span></p>
@@ -88,7 +108,10 @@
   <div id="answer" class="answer-card" hidden>
     <div class="answer-head">
       <span class="answer-label">Answer</span>
-      <button id="copyBtn" class="secondary small" title="Copy the answer">Copy</button>
+      <span>
+        <button id="speakBtn" class="secondary small" title="Read the answer aloud">🔊</button>
+        <button id="copyBtn" class="secondary small" title="Copy the answer">Copy</button>
+      </span>
     </div>
     <div id="answerText" class="answer-text"></div>
     <div id="answerNote" class="answer-note"></div>

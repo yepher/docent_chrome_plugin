@@ -85,3 +85,16 @@ select { width: 100%; font: inherit; color: var(--fg); background: var(--field);
 .mode-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--muted); }
 .log li { white-space: pre-line; }
 #confirmText { white-space: pre-line; }
+.row.tight select { margin-top: 0; flex: 1; }
+#lkModelCustom { margin-top: 6px; }
+.icon-btn { padding: 5px 9px; font-size: 14px; line-height: 1; }
+#micBtn.listening { background: #dc2626; border-color: #dc2626; color: #fff; animation: jevPulse 1.2s ease-in-out infinite; }
+@keyframes jevPulse { 50% { box-shadow: 0 0 0 5px rgba(220,38,38,.25); } }
+.voice-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.voice-bar #voiceText { flex: 1; color: var(--muted); }
+.voice-bar.error #voiceText { color: var(--err); }
+.voice-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: jevBlink 1s ease-in-out infinite; }
+.voice-bar.listening .voice-dot { background: #dc2626; }
+.voice-bar.error .voice-dot { background: var(--err); animation: none; }
+@keyframes jevBlink { 50% { opacity: .3; } }
+.answer-head span { display: flex; gap: 4px; }

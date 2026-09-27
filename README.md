@@ -10,6 +10,34 @@ Click the toolbar icon (or press **Alt+J**), type what you want done on the curr
 
 No build step or dependencies are needed.
 
+## Voice: read aloud, spoken answers, ask by voice
+
+Voice uses LiveKit Inference text-to-speech and speech-to-text with the same LiveKit URL, key and secret as the text model. Pick a voice and a speech-to-text model in ⚙ → *Voice*; ▶ plays a sample.
+
+- **🔊 Read this page aloud.** Reads the page's main text (article or main content, without navigation, headers and footers), or your selection if you right-clicked some text. "Read this page to me" typed in the prompt does the same.
+- **Reading or summarizing one part of a page.** "Read the post I'm looking at", "read the post from Jane Doe", "summarize this article" or "what does the second comment say" work on just that part (`targets.js`):
+  1. **Outline:** `outline.js` walks the page's text in the tab. Each text node belongs to its nearest block-level element, and each block becomes one outline line with an id, whether it's on screen, above or below, and whether it looks like a heading or a button. This doesn't depend on class names or page structure, so it copes with LinkedIn's hashed classes and uneven nesting.
+  2. **Locate:** the text model reads the outline (up to about 700 lines around the screen) and returns the range of lines the request means, e.g. `{"start":"b28","end":"b41","label":"Post by Rhodri Hughes"}`, or "whole page". "This / current / looking at" means the item on screen. Without a text model, Jev picks the starting heading or author line with a Choice, and the range ends before the next line that looks the same.
+  3. **Extract:** the range's full text is collected with "…see more" expanded first. Buttons, reaction and comment counts, timestamps, connection labels and screen-reader duplicate text are left out. The page scrolls to it while it's read.
+- **Spoken answers.** "Summarize this page" and other open questions stream from the text model into TTS sentence by sentence, so speech starts before the answer is finished. Short answers (yes/no, counts, lists, found/hidden items, task results) are spoken too. Answers are spoken when you asked with the mic, when your prompt asks for it ("tell me…", "read it out"; Jev checks with a Noul), or always if you tick *Always speak answers aloud*. 🔊 on the Answer card replays one. ■ Stop cuts it off.
+- **🎤 Ask by voice.** Click the mic and talk. Your words appear in the prompt box as you speak, and a short pause after a finished sentence (or clicking 🎤 again) sends it. The reply is spoken. The first time, Chrome asks for microphone permission in a small tab.
+
+How it works:
+
+```mermaid
+flowchart LR
+  P[Popup / side panel] -->|start, stop| B[Service worker]
+  B -->|session rule adds<br/>Authorization: Bearer JWT| G[(LiveKit Inference gateway)]
+  B -->|text to speak, mic on/off| O[Offscreen document]
+  O <-->|wss /v1/tts: session.create, input_transcript,<br/>session.flush → output_audio, done| G
+  O <-->|wss /v1/stt: input_audio 16 kHz PCM →<br/>interim / final transcripts| G
+  O -->|events| P
+```
+
+- Audio plays and the mic is captured in an **offscreen document** (`offscreen.html`), so speech keeps going after the popup closes.
+- Browser WebSockets can't send headers, so the service worker adds `Authorization: Bearer <token>` to the gateway's WebSocket handshake with a `declarativeNetRequest` session rule. The token is the same short-lived LiveKit token as the text model, minted per session.
+- TTS is 24 kHz 16-bit PCM, scheduled gap-free through Web Audio. STT is 16 kHz PCM from the mic.
+
 ## Side panel and right-click
 
 - **◨** in the popup header moves Jev into Chrome's side panel, which stays open while you click around the page. To make the toolbar icon always open the panel, set *Toolbar icon opens → Side panel* in ⚙.
@@ -128,7 +156,7 @@ The agent runs in the background service worker, so you can close the popup; reo
 
 | File | Role |
 | --- | --- |
-| `manifest.json` | MV3 manifest (activeTab, scripting, storage, tabs, sidePanel, contextMenus, `<all_urls>`) |
+| `manifest.json` | MV3 manifest (activeTab, scripting, storage, tabs, sidePanel, contextMenus, offscreen, declarativeNetRequest, `<all_urls>`) |
 | `background.js` | Agent loop, question building, safety gate, run state |
 | `jev.js` | `/v1/systemone` client with retry/backoff on 429/529 |
 | `items.js` | Injected functions for find/hide: page segmentation, marking, jump-to, mutation watcher, selection |
@@ -136,6 +164,9 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `skill_onshape.js` | Onshape: plan (Jev, or text model + Jev check), build features through the Part Studio API with the session, undo |
 | `skill_chess.js` | Chess: read the position, annotate legal moves, Jev picks, click/drag the move, wait for the reply |
 | `vendor/chess.mjs` | chess.js 0.10.3 (BSD-2-Clause) with an ES-module export appended |
+| `voice.js` | Voice: TTS/STT sessions, gateway auth rule, text clean-up for speech, suggested voices |
+| `offscreen.*` | Offscreen document: TTS WebSocket + audio playback, mic capture + STT WebSocket |
+| `mic.*` | One-time page to grant microphone permission |
 | `lk.js` | LiveKit Inference client: token minting (WebCrypto HMAC), model list, streaming chat |
 | `page.js` | Injected functions: `snapshotPage` (element index) and `performAction` |
 | `candidates.js` | Text and URL candidate spans from the prompt |

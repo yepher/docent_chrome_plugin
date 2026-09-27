@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Jev Browser Agent",
-  "version": "0.3.0",
-  "description": "Type a prompt and let TypeSafe Jev drive the current tab: click, type, select and scroll.",
+  "version": "0.5.0",
+  "description": "Type or say a prompt and let TypeSafe Jev act on the current tab, answer questions about it, and read it aloud.",
   "action": {
     "default_title": "Jev",
     "default_popup": "popup.html",
@@ -29,7 +29,9 @@
     "storage",
     "tabs",
     "sidePanel",
-    "contextMenus"
+    "contextMenus",
+    "offscreen",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
     "<all_urls>"

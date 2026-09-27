@@ -139,6 +139,36 @@ export function snapshotPage(maxElements, textChars) {
   };
 }
 
+// The main readable content of the page (article body), for reading aloud.
+export function readableText(maxChars) {
+  const SKIP = "nav,header,footer,aside,form,button,script,style,noscript,[role=navigation],[role=banner],[role=contentinfo],[aria-hidden=true]";
+  const textLen = (el) => (el.innerText || "").length;
+  let root = document.querySelector("article, main, [role=main]");
+  if (!root || textLen(root) < 400) {
+    // Densest container: the element holding the most paragraph text.
+    let best = null, bestScore = 0;
+    for (const el of document.querySelectorAll("div, section")) {
+      const ps = el.querySelectorAll(":scope > p, :scope > div > p");
+      let score = 0;
+      for (const p of ps) score += (p.innerText || "").length;
+      if (score > bestScore) { bestScore = score; best = el; }
+    }
+    root = best && bestScore > 300 ? best : document.body;
+  }
+  const parts = [];
+  for (const el of root.querySelectorAll("h1,h2,h3,h4,p,li,blockquote,pre,figcaption,td")) {
+    if (el.closest(SKIP)) continue;
+    if (el.matches("li,td") && el.querySelector("p")) continue;
+    const t = (el.innerText || "").replace(/\s+/g, " ").trim();
+    if (t.length < 2) continue;
+    parts.push(/^H\d$/.test(el.tagName) && !/[.!?:]$/.test(t) ? t + "." : t);
+  }
+  let text = parts.join("\n");
+  if (text.length < 200) text = (root.innerText || "").trim();
+  const h1 = document.querySelector("h1");
+  return { title: (h1 && h1.innerText.trim()) || document.title, url: location.href, text: text.slice(0, maxChars), truncated: text.length > maxChars };
+}
+
 // Readable page text (keeps line breaks) for the text model.
 export function pageText(maxChars) {
   const raw = (document.body && document.body.innerText) || "";

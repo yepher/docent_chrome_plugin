@@ -8,9 +8,11 @@
 
 import { systemOne, choice, noul } from "./jev.js";
 import { textCandidates, urlCandidates } from "./candidates.js";
-import { snapshotPage, performAction, highlightElements, pageText } from "./page.js";
+import { snapshotPage, performAction, highlightElements, pageText, readableText } from "./page.js";
+import * as voice from "./voice.js";
 import { chat, lkConfigured, DEFAULT_MODEL } from "./lk.js";
 import { focusRef, clearMarks, getSelectionText } from "./items.js";
+import { pickTarget as pickTargetFromOutline } from "./targets.js";
 import { isChessGoal, colorFromGoal, readChessState, playChess } from "./skill_chess.js";
 import { Chess } from "./vendor/chess.mjs";
 import { onshapeContext, runOnshape, undoOnshape } from "./skill_onshape.js";
@@ -30,6 +32,10 @@ export const DEFAULTS = {
   lkModel: DEFAULT_MODEL,
   lkInferenceUrl: "",
   iconOpens: "popup", // or "panel"
+  // Voice (LiveKit Inference TTS/STT; uses the same LiveKit credentials)
+  ttsVoice: voice.DEFAULT_VOICE,
+  sttModel: voice.DEFAULT_STT,
+  speakAnswers: false,
 };
 const loadSettings = async () => ({ ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS))) });
 const MAX_ELEMENTS = 150;
@@ -47,8 +53,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return publicRun();
       case "jev:start":
         if (run?.status === "running" || run?.status === "confirm") return { error: "A task is already running." };
-        startRun(msg.goal, msg.tabId, msg.selection || "");
+        startRun(msg.goal, msg.tabId, msg.selection || "", { voice: !!msg.voice, read: !!msg.read });
         return publicRun();
+      // ---- voice ----
+      case "voice:state":
+        return { ...voice.state };
+      case "voice:stop":
+        await voice.stopSpeaking();
+        return { ...voice.state };
+      case "voice:speakText": {
+        const s = await loadSettings();
+        if (!lkConfigured(s)) return { error: "Set up LiveKit in Settings to use voice." };
+        await voice.speak(msg.ttsVoice ? { ...s, ttsVoice: msg.ttsVoice } : s, msg.text);
+        return { ...voice.state };
+      }
+      case "voice:listen": {
+        const s = await loadSettings();
+        if (!lkConfigured(s)) return { error: "Set up LiveKit in Settings to use voice." };
+        await voice.stopSpeaking();
+        voice.state.listenFor = { tabId: msg.tabId, selection: msg.selection || "" };
+        await voice.startListening(s);
+        return { ...voice.state };
+      }
+      case "voice:stopListening":
+        await voice.stopListening();
+        return { ...voice.state };
+      case "voice:event":
+        if (["tts-done", "tts-error"].includes(msg.kind)) voice.state.speaking = false;
+        if (["stt-stopped", "stt-error", "mic-denied"].includes(msg.kind)) voice.state.listening = false;
+        if (msg.kind === "mic-denied") chrome.tabs.create({ url: chrome.runtime.getURL("mic.html") });
+        if (msg.kind === "stt-stopped" && msg.text?.trim() && voice.state.listenFor?.tabId != null) {
+          const { tabId, selection } = voice.state.listenFor;
+          voice.state.listenFor = null;
+          if (!(run?.status === "running" || run?.status === "confirm")) startRun(msg.text.trim(), tabId, selection, { voice: true });
+        }
+        if (msg.kind === "tts-error" && run && run.status === "done") log("warn", `Voice: ${msg.message}`);
+        return { ok: true };
       case "jev:focus":
         return { ok: await inject(msg.tabId, focusRef, [msg.ref.attr, msg.ref.val]).catch(() => false) };
       case "jev:clearMarks":
@@ -100,8 +140,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 function publicRun() {
   if (!run) return { run: null };
-  const { goal, tabId, status, log, pending, step, answer, selection } = run;
-  return { run: { goal, tabId, status, log, pending, step, answer, selection: selection ? selection.slice(0, 300) : "" } };
+  const { goal, tabId, status, log, pending, step, answer, selection, speak } = run;
+  return { run: { goal, tabId, status, log, pending, step, answer, speak: !!speak, selection: selection ? selection.slice(0, 300) : "" } };
 }
 
 function publish() {
@@ -124,11 +164,22 @@ function finish(status, text) {
   run.pending = null;
   clearInterval(run.keepAlive);
   log(status === "done" ? "done" : status === "error" ? "error" : "warn", text);
+  // Voice replies: speak the answer (or the outcome) unless it was already streamed.
+  if (run.speak && run.settings && lkConfigured(run.settings) && !run.answer?.spoken) {
+    const said = run.answer ? spokenAnswer(run.answer) : text;
+    if (said) voice.speak(run.settings, said).catch((e) => log("warn", `Voice: ${e.message}`));
+  }
+}
+
+function spokenAnswer(a) {
+  const items = (a.items || []).map((x) => x.text).filter(Boolean);
+  const list = items.length && items.length <= 12 ? `: ${items.join(", ")}` : "";
+  return `${a.text}${list}.`;
 }
 
 // ---------- the loop ----------
-async function startRun(goal, tabId, selection) {
-  run = { goal, tabId, selection, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
+async function startRun(goal, tabId, selection, opts = {}) {
+  run = { goal, tabId, selection, speak: !!opts.voice, read: !!opts.read, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
   // Extension API calls keep the MV3 service worker alive during long waits (e.g. confirmation).
   run.keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   publish();
@@ -142,6 +193,12 @@ async function startRun(goal, tabId, selection) {
 
 async function agentLoop(r) {
   const s = await loadSettings();
+  r.settings = s;
+  if (s.speakAnswers && lkConfigured(s)) r.speak = true;
+  if (r.read) {
+    if (!lkConfigured(s)) throw new Error("Reading aloud uses LiveKit Inference TTS. Add your LiveKit URL, key and secret in Settings.");
+    return readAloud(r, s);
+  }
   if (!s.apiKey) throw new Error("No TypeSafe API key. Open Settings in the popup and paste your key.");
   const ask = (state, questions) =>
     systemOne({ apiBase: s.apiBase, apiKey: s.apiKey, model: s.model, state, questions, signal: r.abort.signal });
@@ -159,6 +216,7 @@ async function agentLoop(r) {
   await settle(r.tabId);
   const llm = lkConfigured(s) ? s : null;
   const kind = await classifyPrompt(r, ask, llm);
+  if (kind === "read") return readAloud(r, s);
   if (kind !== "task") return answerQuestion(r, ask, kind, llm, s);
 
   // Site skills: apps the generic DOM agent can't operate (canvas UIs, dialogs) get a
@@ -417,16 +475,21 @@ const EXPLAIN_KIND = "A request for a written answer about the current page: sum
 
 async function classifyPrompt(r, ask, llm) {
   const snap = await inject(r.tabId, snapshotPage, [60, 600]).catch(() => null);
-  const kinds = llm ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND } : PROMPT_KINDS;
+  const kinds = llm
+    ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, read: "A request to read the page, the article or the selected text out loud, word for word" }
+    : PROMPT_KINDS;
+  const questions = { kind: choice("What kind of request is `user_prompt`?", kinds) };
+  if (llm) questions.wants_voice = noul("Does `user_prompt` ask for the answer to be spoken, said or read out loud?");
   const res = await ask(
     {
       user_prompt: r.goal,
       current_page: snap ? { url: snap.url, title: snap.title } : "unknown",
       ...(r.selection ? { selected_text: r.selection.slice(0, 1000), note: "The prompt is about `selected_text`, which the user selected on the page" } : {}),
     },
-    { kind: choice("What kind of request is `user_prompt`?", kinds) }
+    questions
   );
   const a = res.answers.kind;
+  if ((res.answers.wants_voice?.noul ?? 0) >= 0.5) r.speak = true;
   log("info", `Understood as: ${a.choice.replace("_", "/")}`, `confidence ${pct(a.confidence)}`);
   return a.choice;
 }
@@ -565,27 +628,73 @@ async function filterAnswer(r, s, kind) {
   finish("done", mode === "highlight" ? "Matches are outlined on the page. Click one in the list to jump to it." : "Done. Use Undo to bring them back, or save this as a rule for the site.");
 }
 
+// ---------- read aloud (LiveKit Inference TTS) ----------
+async function readAloud(r, s) {
+  let title, text, truncated = false, what;
+  if (r.selection) {
+    const tab = await chrome.tabs.get(r.tabId);
+    title = tab.title; text = r.selection; what = "the selection";
+  } else {
+    const target = await pickTarget(r, s, "read aloud");
+    if (target.kind === "item") {
+      title = target.first; text = target.text; what = `"${target.first.slice(0, 60)}"`;
+    } else {
+      const page = await inject(r.tabId, readableText, [60000]);
+      if (!page?.text) return finish("stopped", "Couldn't find readable text on this page.");
+      ({ title, text, truncated } = page);
+      text = `${title}. ${text}`;
+      what = `"${title}"`;
+    }
+  }
+  const words = text.split(/\s+/).length;
+  const minutes = Math.max(1, Math.round(words / 160));
+  log("info", `Reading ${what} aloud: ${words.toLocaleString()} words, about ${minutes} min.`, truncated ? "Long page: reading the first 60,000 characters." : undefined);
+  await voice.speak(s, text);
+  r.answer = { text: "Reading aloud", note: `${title} · about ${minutes} min · press ■ to stop`, items: [], spoken: true, reading: true };
+  finish("done", "Reading aloud.");
+}
+
+// Which part of the page does the request mean? See targets.js (page outline →
+// text model or Jev picks the range → extract its text).
+function pickTarget(r, s, purpose) {
+  return pickTargetFromOutline({
+    tabId: r.tabId, goal: r.goal, settings: s, llm: lkConfigured(s) ? s : null, signal: r.abort.signal,
+    log: (k, t, d) => log(k, t, d),
+    inject: (func, args) => inject(r.tabId, func, args),
+  }, purpose);
+}
+
 // ---------- text model (LiveKit Inference) ----------
 async function writtenAnswer(r, llm) {
-  const page = r.selection
-    ? { ...(await chrome.tabs.get(r.tabId)), text: r.selection.slice(0, 16000) }
-    : await inject(r.tabId, pageText, [16000]);
+  let page;
+  if (r.selection) {
+    page = { ...(await chrome.tabs.get(r.tabId)), text: r.selection.slice(0, 16000) };
+  } else {
+    const target = await pickTarget(r, r.settings || llm, "answer about");
+    page = target.kind === "item"
+      ? { ...(await chrome.tabs.get(r.tabId)), text: target.text.slice(0, 16000), item: true }
+      : await inject(r.tabId, pageText, [16000]);
+  }
   const model = llm.lkModel || DEFAULT_MODEL;
   r.answer = { text: "", note: `Written by ${model} from the ${r.selection ? "selected" : "page"} text. Not checked by Jev.`, items: [], long: true };
   log("info", `Asking ${model}…`);
-  let last = 0;
+  let last = 0, sent = 0;
+  // Spoken reply: stream sentences to TTS while the text model is still writing.
+  const speaker = r.speak ? await voice.speakStream(llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
   const text = await chat(llm, [
     { role: "system", content: "You answer questions about the web page the user is looking at, using only the page content provided. Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the page doesn't contain the answer, say so." },
-    { role: "user", content: `Page title: ${page.title}\nURL: ${page.url}\n\n${r.selection ? "Text the user selected on the page" : "Page text"}:\n${page.text}\n\nQuestion: ${r.goal}` },
+    { role: "user", content: `Page title: ${page.title}\nURL: ${page.url}\n\n${r.selection ? "Text the user selected on the page" : page.item ? "The post or item on the page the user means" : "Page text"}:\n${page.text}\n\nQuestion: ${r.goal}` },
   ], {
     signal: r.abort.signal,
     maxTokens: 1200,
     onDelta: (t) => {
       r.answer.text = t;
+      if (speaker) { speaker.push(t.slice(sent)); sent = t.length; }
       if (Date.now() - last > 150) { last = Date.now(); publish(); }
     },
   });
   r.answer.text = text.trim() || "(the model returned nothing)";
+  if (speaker) { speaker.push(text.slice(sent)); speaker.end(); r.answer.spoken = true; }
   log("answer", r.answer.text.length > 140 ? r.answer.text.slice(0, 137) + "…" : r.answer.text, r.answer.note);
   finish("done", "Answered.");
 }
