@@ -4,6 +4,7 @@
 
 import { chat, DEFAULT_MODEL } from "./lk.js";
 import * as voice from "./voice.js";
+import * as expr from "./expressive.js";
 
 const labelOf = (id) => (voice.SUGGESTED_VOICES.find(([v]) => v === id) || [])[1] || "";
 const nameOf = (id, fallback) => labelOf(id).split(" · ")[0] || fallback;
@@ -75,6 +76,10 @@ export class Podcast {
         `About ${words} words in total. Each turn is 1 to 3 short sentences of natural spoken English.`,
         `No stage directions, sound effects, music cues, markdown or emojis. Don't say "welcome to the podcast" or name the show.`,
         `Format: one turn per line, exactly "${a.name}: …" or "${b.name}: …".`,
+        ...(this.d.expressive ? [
+          `Put the delivery markers inside each line, after the "Name:" prefix, e.g. "${b.name}: <expr type=\"expression\" label=\"curious\"/> Wait, really?" Make it sound like a lively, natural conversation: react to each other, vary the energy, and let genuine surprise, amusement or doubt come through.`,
+          expr.scriptInstructions(this.d.hosts),
+        ] : []),
         ...(cited ? [
           `The source is split into numbered blocks: text blocks like [p12] and images, charts or videos like [m3] (with their alt text and caption).`,
           `End every line with the ids of the blocks that line is about, in square brackets, e.g. "${b.name}: So sales doubled in a year? [p14, m2]". Use the ids exactly as given; never say them aloud.`,
@@ -84,7 +89,7 @@ export class Podcast {
       { role: "user", content: `Title: ${title}\nURL: ${url}\n${goal ? `Listener's request: ${goal}\n` : ""}\nSource text:\n${text}` },
     ], {
       signal,
-      maxTokens: Math.round(words * 2.2) + 200,
+      maxTokens: Math.round(words * (this.d.expressive ? 3.6 : 2.2)) + 200,
       onDelta: (t) => { buf = t; take(false); },
     });
     buf = out;
@@ -149,7 +154,9 @@ export class Podcast {
         this.d.onTurn?.(t);
         this.sid = `pod-${Date.now()}-${this.idx}`;
         const done = new Promise((r) => (this.waiting = r));
-        await voice.speak({ ...this.d.settings, ttsVoice: host.voice }, t.text, { sid: this.sid, capture: `${this.id}:${this.idx}` });
+        // Expressive markers are lowered to this host's voice markup (or stripped).
+        const said = this.d.expressive ? expr.forVoice(host.voice, t.text) : t.text;
+        await voice.speak({ ...this.d.settings, ttsVoice: host.voice }, said, { sid: this.sid, capture: `${this.id}:${this.idx}`, raw: this.d.expressive });
         const reason = await done;
         if (this.stopped) break;
         if (reason !== "finished") { this.paused = true; break; } // interrupted: "continue" resumes this turn
@@ -187,7 +194,8 @@ export class Podcast {
     for (const h of this.d.hosts) specs[h.voice] = await voice.ttsSpec(this.d.settings, h.voice);
     const turns = this.turns.map((t, idx) => {
       const sp = specs[this.d.hosts[t.host].voice];
-      return { idx, url: sp.url, create: sp.create, gen: sp.gen, text: voice.forSpeech(t.text) };
+      const v = this.d.hosts[t.host].voice;
+      return { idx, url: sp.url, create: sp.create, gen: sp.gen, text: this.d.expressive ? expr.forVoice(v, t.text) : voice.forSpeech(t.text) };
     });
     const sampleRate = Object.values(specs)[0].sampleRate;
     return chrome.runtime.sendMessage({ target: "offscreen", type: "pod:export", pod: this.id, turns, sampleRate });
@@ -196,6 +204,6 @@ export class Podcast {
   get finished() { return this.scriptDone && this.idx >= this.turns.length; }
 
   transcript() {
-    return this.turns.map((t, i) => `${i === this.idx && this.playing ? "▶ " : ""}${this.d.hosts[t.host].name}: ${t.text}`).join("\n\n");
+    return this.turns.map((t, i) => `${i === this.idx && this.playing ? "▶ " : ""}${this.d.hosts[t.host].name}: ${expr.strip(t.text)}`).join("\n\n");
   }
 }

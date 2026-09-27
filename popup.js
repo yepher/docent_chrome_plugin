@@ -7,7 +7,7 @@ const DEFAULTS = {
   decider: "jev", layaBuild: "q4e8", layaDevice: "auto", layaModelBase: "",
   lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
   iconOpens: "popup",
-  ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "",
+  ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "", podcastExpressive: true,
 };
 const IN_PANEL = new URLSearchParams(location.search).has("panel");
 if (IN_PANEL) document.documentElement.classList.add("panel");
@@ -110,7 +110,7 @@ $("ttsVoice").onchange = () => {
 $("ttsPreview").onclick = async () => {
   const f = readForm();
   const name = ($("ttsVoice").selectedOptions[0]?.textContent || "").split(" · ")[0];
-  const r = await send({ type: "voice:speakText", ttsVoice: f.ttsVoice, text: `Hi, I'm ${name || "your Jev voice"}. I can read this page to you, or answer questions about it.` });
+  const r = await send({ type: "voice:speakText", ttsVoice: f.ttsVoice, text: `Hi, I'm ${name || "your Docent voice"}. I can read this page to you, or answer questions about it.` });
   if (r?.error) lkStatus(r.error, "err");
 };
 
@@ -177,6 +177,15 @@ $("layaClearBtn").onclick = async () => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "laya:progress" && !$("layaFields").hidden) layaText(msg.text);
 });
+
+$("clearBtn").onclick = async () => {
+  const res = await send({ type: "jev:clear" });
+  if (res?.run) return render(res.run); // a task is still running: nothing cleared
+  $("prompt").value = "";
+  navIndex = -1;
+  render(null);
+  $("prompt").focus();
+};
 
 $("settingsBtn").onclick = () => ($("settings").hidden = !$("settings").hidden);
 $("saveSettings").onclick = async () => {
@@ -279,7 +288,7 @@ function setPending(p) {
     $("ctxText").title = pending.selection.slice(0, 1000);
     $("prompt").placeholder = "Ask about the selected text, e.g. \"explain this\" or \"is this a good deal?\"";
   } else {
-    $("prompt").placeholder = "What should Jev do on this page? e.g. search for \"mechanical keyboards\" and open the first result";
+    $("prompt").placeholder = "What should Docent do on this page? e.g. search for \"mechanical keyboards\" and open the first result";
   }
 }
 $("ctxClear").onclick = () => setPending(null);
@@ -311,7 +320,7 @@ function voiceBar(mode, text) {
   bar.hidden = !mode;
   bar.className = "voice-bar " + (mode || "");
   if (text) $("voiceText").textContent = text;
-  // Pause / resume is offered whenever Jev is speaking (or paused).
+  // Pause / resume is offered whenever Docent is speaking (or paused).
   const canPause = mode === "speaking" || mode === "paused";
   $("voicePause").hidden = !canPause;
   $("voicePause").textContent = mode === "paused" ? "▶ Resume" : "⏸ Pause";
@@ -480,6 +489,8 @@ function render(run) {
   lastRun = run;
   const status = run?.status;
   const busy = status === "running" || status === "confirm";
+  $("clearBtn").disabled = busy;
+  $("clearBtn").title = busy ? "Clear history (after the task finishes)" : "Clear history";
   $("status").textContent = LABELS[status] || "";
   $("status").className = "status " + (status || "");
   $("runBtn").disabled = busy;
@@ -520,7 +531,7 @@ function render(run) {
     const dl = ans.dl;
     $("podDlBtn").disabled = dl?.state === "rendering";
     $("podDlBtn").textContent = dl?.state === "rendering" ? `Preparing audio… ${dl.done}/${dl.total}` : dl?.state === "saved" ? "⬇ Download again" : "⬇ Download MP3";
-    $("podDlText").textContent = dl?.state === "saved" ? `${dl.text} · in Downloads/Jev podcasts` : dl?.state === "error" ? dl.text : "";
+    $("podDlText").textContent = dl?.state === "saved" ? `${dl.text} · in Downloads/Docent podcasts` : dl?.state === "error" ? dl.text : "";
     $("podDlText").className = "help" + (dl?.state === "error" ? " err" : "");
     const f = ans.filter;
     $("answerActions").hidden = !f;

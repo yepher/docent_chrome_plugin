@@ -115,3 +115,5 @@ button.chip.ai::before { content: "✦ "; color: var(--accent); }
 #podDlText.err { color: var(--err); }
 #podActions { margin-top: 6px; }
 #layaStatus.ok { color: var(--ok); } #layaStatus.err { color: var(--err); }
+#clearBtn { display: inline-flex; align-items: center; padding: 4px 6px; }
+#clearBtn:not(:disabled):hover { color: var(--err); }

@@ -37,7 +37,7 @@ function ttsStop(reason = "stopped") {
   emit("tts-done", { reason, played: reason === "finished" ? 1 : played, seg: t.seg, sentences: t.segs.length > 0, sid: t.sid || null });
 }
 
-// Words Jev is saying (or just said), to tell its own voice coming back through the
+// Words Docent is saying (or just said), to tell its own voice coming back through the
 // mic apart from you talking.
 let lastSpoken = { words: new Set(), until: 0 };
 const wordsOf = (t) => (t.toLowerCase().match(/[a-z0-9']+/g) || []);
@@ -165,7 +165,7 @@ async function sttStart({ url, create, continuous, endpointMs }) {
     const text = data.transcript || data.text || "";
     const speech = data.type === "interim_transcript" || data.type === "preflight_transcript" || data.type === "final_transcript";
     if (speech && s.continuous) {
-      // Conversation mode: drop Jev's own voice, let you interrupt it, and cut the
+      // Conversation mode: drop Docent's own voice, let you interrupt it, and cut the
       // stream into utterances at pauses.
       if (!text.trim() || isEcho(text)) return;
       if (ttsPlaying() && wordsOf(text).length >= 2) { ttsStop("barge-in"); emit("barge-in", { text }); }
@@ -340,8 +340,99 @@ function layaCall(msg) {
   return new Promise((resolve) => { layaPending.set(id, resolve); layaWorker.postMessage({ ...msg, id }); });
 }
 
+// ---------- PDF: Chrome's PDF viewer can't be scripted, so read the file with pdf.js ----------
+let pdfjs = null;
+async function pdfExtract({ url, maxPages = 80 }) {
+  if (!pdfjs) {
+    pdfjs = await import("./vendor/pdfjs/pdf.min.mjs");
+    pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("vendor/pdfjs/pdf.worker.min.mjs");
+  }
+  let res;
+  try {
+    res = await fetch(url, { credentials: "include" });
+  } catch (e) {
+    throw new Error(url.startsWith("file:")
+      ? "Can't open local PDFs yet: in chrome://extensions → Docent → Details, turn on \"Allow access to file URLs\"."
+      : `Couldn't download the PDF (${e.message}).`);
+  }
+  if (!res.ok) throw new Error(`Couldn't download the PDF (HTTP ${res.status}).`);
+  const data = new Uint8Array(await res.arrayBuffer());
+  const doc = await pdfjs.getDocument({
+    data, isEvalSupported: false, cMapUrl: chrome.runtime.getURL("vendor/pdfjs/cmaps/"), cMapPacked: true,
+  }).promise;
+  const meta = await doc.getMetadata().catch(() => null);
+  const pages = Math.min(doc.numPages, maxPages);
+  const paras = [];
+  for (let n = 1; n <= pages; n++) {
+    const page = await doc.getPage(n);
+    const tc = await page.getTextContent();
+    paras.push(...pdfParagraphs(tc.items, n));
+    page.cleanup();
+  }
+  const title = (meta?.info?.Title || "").trim();
+  doc.destroy();
+  return { title, numPages: doc.numPages, pagesRead: pages, paras };
+}
+
+// Rebuild lines and paragraphs from pdf.js text items: items on the same baseline form a
+// line; a bigger vertical gap, a jump back up (next column) or a font-size change starts a
+// new paragraph. Rotated text (e.g. arXiv's side stamp) and bare page numbers are dropped;
+// words hyphenated across lines are joined again.
+function pdfParagraphs(items, page) {
+  const lines = [];
+  let cur = null;
+  for (const it of items) {
+    if (typeof it.str !== "string") continue;
+    const t = it.transform;
+    if (Math.abs(t[1]) > 0.01 || Math.abs(t[2]) > 0.01) continue; // rotated
+    const h = Math.abs(t[3]) || it.height || 10;
+    const x = t[4], y = t[5];
+    if (!it.str.trim()) { if (cur && it.hasEOL) cur = null; else if (cur && !cur.text.endsWith(" ")) cur.text += " "; continue; }
+    if (!cur || Math.abs(y - cur.y) > h * 0.5) {
+      cur = { y, x, h, xEnd: x, text: "" };
+      lines.push(cur);
+    } else if (cur.text && !cur.text.endsWith(" ") && x > cur.xEnd + h * 0.12) {
+      cur.text += " ";
+    }
+    cur.text += it.str;
+    cur.xEnd = x + (it.width || 0);
+    cur.h = Math.max(cur.h, h);
+    if (it.hasEOL) cur = null;
+  }
+  const ls = lines.map((l) => ({ ...l, text: l.text.replace(/\s+/g, " ").trim() })).filter((l) => l.text && !/^\d{1,4}$/.test(l.text));
+  if (!ls.length) return [];
+  const gaps = [];
+  for (let i = 1; i < ls.length; i++) { const g = ls[i - 1].y - ls[i].y; if (g > 0 && g < ls[i].h * 3) gaps.push(g); }
+  gaps.sort((a, b) => a - b);
+  const gap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : ls[0].h * 1.2;
+  const hs = ls.map((l) => l.h).sort((a, b) => a - b);
+  const bodyH = hs[Math.floor(hs.length / 2)];
+  const out = [];
+  let para = null;
+  for (let i = 0; i < ls.length; i++) {
+    const l = ls[i], prev = ls[i - 1];
+    const brk = !prev || prev.y - l.y > gap * 1.45 || prev.y - l.y < -gap * 0.5 || Math.abs(l.h - prev.h) > bodyH * 0.15;
+    if (brk) { para = { page, lines: [l], h: l.h }; out.push(para); }
+    else para.lines.push(l);
+  }
+  return out.map((p) => {
+    let text = "";
+    for (const l of p.lines) {
+      if (/[a-z]-$/.test(text) && /^[a-z]/.test(l.text)) text = text.slice(0, -1) + l.text;
+      else text += (text ? " " : "") + l.text;
+    }
+    const heading = p.lines.length <= 2 && text.length < 100 && !/[.:,;]$/.test(text) &&
+      (p.h > bodyH * 1.12 || /^(\d+(\.\d+)*\.?|[A-Z]\.?|[IVX]+\.)\s+[A-Z]/.test(text) || /^(abstract|introduction|conclusions?|references|acknowledg)/i.test(text));
+    return { page, text, heading };
+  }).filter((p) => (p.text.match(/[\p{L}\p{N}]/gu) || []).length >= 2);
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== "offscreen") return;
+  if (msg.type === "pdf:extract") {
+    pdfExtract(msg).then(sendResponse, (e) => sendResponse({ error: e.message || String(e) }));
+    return true;
+  }
   if (typeof msg.type === "string" && msg.type.startsWith("laya:")) {
     const { target, type, ...rest } = msg;
     layaCall({ ...rest, type: type.slice(5) }).then(sendResponse);

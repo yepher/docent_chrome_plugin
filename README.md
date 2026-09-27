@@ -1,6 +1,8 @@
-# Jev Browser Agent (Chrome extension)
+# Docent (Chrome extension)
 
-Click the toolbar icon (or press **Alt+J**), type what you want done on the current page, and press **Run**. The extension uses TypeSafe's **Jev** model to drive the tab one step at a time, or **Laya**, a similar decision model that runs entirely in your browser with no key (see [Jev or Laya](#jev-or-laya)).
+A guide for the page you're on. Like a museum docent, it explains what's in front of you, reads it to you, points at what it's talking about, and can act for you.
+
+Click the toolbar icon (or press **Alt+J**), type what you want done on the current page, and press **Run**. Docent uses TypeSafe's **Jev** model to make its decisions and drive the tab one step at a time, or **Laya**, a similar decision model that runs entirely in your browser with no key (see [Jev or Laya](#jev-or-laya)).
 
 ## Install
 
@@ -47,22 +49,23 @@ Voice uses LiveKit Inference text-to-speech and speech-to-text with the same Liv
 - **🔊 Read this page aloud.** Reads the page's main text (article or main content, without navigation, headers and footers), or your selection if you right-clicked some text. "Read this page to me" typed in the prompt does the same. The whole page is read a chunk at a time (about two screens each), starting from what's on screen. When a chunk finishes, Jev takes the next one and scrolls down to it, expanding "…see more" as it goes. At the end of the loaded content it scrolls to the bottom so feeds load more posts, and it keeps going until nothing more appears ("That's the end of the page.") or you press ■ Stop. In a conversation, "stop" pauses and "continue" picks up at the sentence you stopped at.
 - **🎧 Podcast mode.** "Make this a podcast", "turn this post into a podcast" or the 🎧 button: the text model writes a short script for two hosts discussing the article, post, thread or selection (the same outline → locate → extract step picks the part you mean), and two different voices perform it. One host explains the piece and the other asks the questions a listener would. The first host starts talking as soon as the first line is written. It runs about 3 minutes by default; "a 5 minute podcast", "a quick podcast" or "a detailed podcast" change the length. The hosts are your main voice plus a contrasting one (⚙ → *Second podcast voice* to choose it). The Podcast card shows the transcript and follows the line being spoken. ■ Stop ends it; in a conversation, "stop" pauses and "continue" resumes at the same line.
   - **It shows what they're talking about.** Before writing, the page (or the located post) is split into numbered text blocks `[p12]` and images, charts and videos `[m3]` (described by their alt text and caption, `podsource.js`). The script cites the blocks each line is about, e.g. `Blake: So sales doubled? [p14, m2]`. While that line plays, its text is highlighted in blue on the page, an image or chart it mentions gets a blue outline, and the page scrolls to bring it into view. The ids are never spoken or shown in the transcript.
-  - **⬇ Download MP3.** Saves the whole show to `Downloads/Jev podcasts/` to listen to later. Turns you've already heard are reused; the rest are synthesized without playing (faster than real time). Both voices are joined with short pauses and encoded as a 64 kbps mono MP3 with LAME (`vendor/lamejs.mjs`, LGPL). You can download without listening first: press ■ Stop, then ⬇.
-- **⏸ Pause / ▶ Resume.** While Jev is speaking, the voice bar has ⏸ Pause (or press **Alt+Shift+P**). It freezes the audio mid-word, along with the read-along highlight and scrolling, and ▶ Resume continues from the same spot. It works for page reading, podcasts and spoken answers. In a conversation, say "pause", "hold on" or "one second", then "continue" or "resume".
+  - **Expressive voices** (⚙ → *Expressive podcasts*, on by default). The script marks each line's delivery (emotion, pauses, emphasis, laughs) the way [LiveKit's expressive mode](https://livekit.com/blog/making-voice-agents-sound-human-with-expressive-mode) does. The text model writes `<expr type="expression" label="excited"/>`-style markers, taught with the same per-provider instructions as the Agents SDK, and `expressive.js` converts them to each host's native markup before speaking: Cartesia sonic-3 gets `<emotion value="excited"/>`, `<break time="500ms"/>` and speed/volume tags; Fish Audio s2 gets `[very excited]`, `[laughing]`, `[break]` and `[emphasis] word`. The two hosts can use different providers; each line is converted for its own speaker's voice. Voices without expressive support (such as Deepgram) have the markers removed. The conversion is a port of the SDK's `convert_markup` and matched its output on every test case.
+  - **⬇ Download MP3.** Saves the whole show to `Downloads/Docent podcasts/` to listen to later. Turns you've already heard are reused; the rest are synthesized without playing (faster than real time). Both voices are joined with short pauses and encoded as a 64 kbps mono MP3 with LAME (`vendor/lamejs.mjs`, LGPL). You can download without listening first: press ■ Stop, then ⬇.
+- **⏸ Pause / ▶ Resume.** While Docent is speaking, the voice bar has ⏸ Pause (or press **Alt+Shift+P**). It freezes the audio mid-word, along with the read-along highlight and scrolling, and ▶ Resume continues from the same spot. It works for page reading, podcasts and spoken answers. In a conversation, say "pause", "hold on" or "one second", then "continue" or "resume".
 - **What next?** After each run, a row of clickable suggestions appears under the answer, e.g. *Summarize this page*, *🎧 Make it a podcast*, *🔊 Read this page aloud*. With a text model set up, up to three page-specific ideas (marked ✦) are added, such as "Hide sponsored posts" on a feed. Clicking one stops anything being read out and runs it.
 - **Reading or summarizing one part of a page.** "Read the post I'm looking at", "read the post from Jane Doe", "summarize this article" or "what does the second comment say" work on just that part (`targets.js`):
   1. **Outline:** `outline.js` walks the page's text in the tab. Each text node belongs to its nearest block-level element, and each block becomes one outline line with an id, whether it's on screen, above or below, and whether it looks like a heading or a button. This doesn't depend on class names or page structure, so it copes with LinkedIn's hashed classes and uneven nesting.
   2. **Locate:** the text model reads the outline (up to about 700 lines around the screen) and returns the range of lines the request means, e.g. `{"start":"b28","end":"b41","label":"Post by Rhodri Hughes"}`, or "whole page". "This / current / looking at" means the item on screen. Without a text model, Jev picks the starting heading or author line with a Choice, and the range ends before the next line that looks the same.
   3. **Extract:** the range's full text is collected with "…see more" expanded first. Buttons, reaction and comment counts, timestamps, connection labels and screen-reader duplicate text are left out. The page scrolls to it while it's read.
 - **Spoken answers.** "Summarize this page" and other open questions stream from the text model into TTS sentence by sentence, so speech starts before the answer is finished. Short answers (yes/no, counts, lists, found/hidden items, task results) are spoken too. Answers are spoken when you asked with the mic, when your prompt asks for it ("tell me…", "read it out"; Jev checks with a Noul), or always if you tick *Always speak answers aloud*. 🔊 on the Answer card replays one. ■ Stop cuts it off.
-- **Read-along highlight.** While Jev reads a page, a post or your selection, the sentence being spoken is highlighted on the page in yellow, with the last few already-read sentences faintly shaded, and the page scrolls to follow it. Each spoken sentence is matched to the page text on letters and digits only, so bullets, line breaks and punctuation don't throw it off. The highlight uses the CSS Custom Highlight API, so the page's HTML isn't changed. The player reports which sentence is playing, estimated from each sentence's share of the audio.
-- **💬 Hands-free conversation** (or **Alt+Shift+J**). The mic stays open and each pause ends what you said. Jev answers out loud, and you can talk over it to interrupt. Follow-ups work: "tell me more about it" or "what about the second post?" is rewritten into a standalone request using the conversation so far, and the conversation is given to the text model with the page. Spoken commands:
+- **Read-along highlight.** While Docent reads a page, a post or your selection, the sentence being spoken is highlighted on the page in yellow, with the last few already-read sentences faintly shaded, and the page scrolls to follow it. Each spoken sentence is matched to the page text on letters and digits only, so bullets, line breaks and punctuation don't throw it off. The highlight uses the CSS Custom Highlight API, so the page's HTML isn't changed. The player reports which sentence is playing, estimated from each sentence's share of the audio.
+- **💬 Hands-free conversation** (or **Alt+Shift+J**). The mic stays open and each pause ends what you said. Docent answers out loud, and you can talk over it to interrupt. Follow-ups work: "tell me more about it" or "what about the second post?" is rewritten into a standalone request using the conversation so far, and the conversation is given to the text model with the page. Spoken commands:
   - "stop", "wait", "quiet": stop talking and keep listening
   - "continue", "go on": resume reading at the sentence where you interrupted
   - "repeat that": say the last answer again
   - "stop listening", "that's all", "goodbye": end the conversation
 
-  Jev's own voice coming back through the mic is ignored: a transcript is dropped when most of its words are words Jev is saying. It stops listening after 2 minutes of silence. The side panel shows the exchange as chat bubbles. It keeps working with the popup closed, since audio and turn-taking live in the offscreen document and service worker (`conversation.js`).
+  Docent's own voice coming back through the mic is ignored: a transcript is dropped when most of its words are words Docent is saying. It stops listening after 2 minutes of silence. The side panel shows the exchange as chat bubbles. It keeps working with the popup closed, since audio and turn-taking live in the offscreen document and service worker (`conversation.js`).
 - **🎤 Ask by voice.** Click the mic and talk. Your words appear in the prompt box as you speak, and a short pause after a finished sentence (or clicking 🎤 again) sends it. The reply is spoken. The first time, Chrome asks for microphone permission in a small tab.
 
 How it works:
@@ -81,10 +84,24 @@ flowchart LR
 - Browser WebSockets can't send headers, so the service worker adds `Authorization: Bearer <token>` to the gateway's WebSocket handshake with a `declarativeNetRequest` session rule. The token is the same short-lived LiveKit token as the text model, minted per session.
 - TTS is 24 kHz 16-bit PCM, scheduled gap-free through Web Audio. STT is 16 kHz PCM from the mic.
 
+## PDFs
+
+Chrome shows PDFs in its built-in viewer, which extensions can't read or script. So on a PDF tab, Docent downloads the file itself (with your cookies, so PDFs behind a login work too) and extracts the text with [pdf.js](https://github.com/mozilla/pdf.js) (Apache-2.0) in the offscreen document (`pdfdoc.js`, `offscreen.js`). It rebuilds paragraphs and section headings from the text positions, drops page numbers and rotated side text (like arXiv's stamp), and rejoins words hyphenated across lines. The Attention Is All You Need paper comes out as 202 paragraphs with every section heading found. The result is cached per URL.
+
+What works on a PDF:
+
+- **Questions and summaries** ("summarize this paper", "what dataset did they use?", "is there a code link?") use the PDF's text, up to about 48,000 characters.
+- **Sections:** "read the conclusion", "summarize section 3.2" or "podcast of the related work": the text model picks the paragraphs from an outline of the PDF labelled by page.
+- **Reading aloud** reads the title, skips the author list, starts at the Abstract and stops before the references. **The viewer follows along:** Docent turns Chrome's PDF viewer to the page being read (`#page=N`). There's no sentence highlight, since the viewer can't be marked up. ⏸, ■ and "continue" work as usual.
+- **Podcasts** number the PDF's paragraphs so each line cites what it's about, and the viewer turns to the page being discussed. ⬇ Download MP3 works the same.
+- **Not possible in the viewer:** clicking or typing, and find/hide/dim. Docent says so instead of trying.
+
+Local files (`file://…pdf`) need *Allow access to file URLs* on Docent's details page in `chrome://extensions`. Very long PDFs are read up to their first 80 pages.
+
 ## Side panel and right-click
 
-- **◨** in the popup header moves Jev into Chrome's side panel, which stays open while you click around the page. To make the toolbar icon always open the panel, set *Toolbar icon opens → Side panel* in ⚙.
-- Select text on any page, right-click, and choose **Ask Jev about "…"**. The side panel opens with the selection attached (shown as a chip above the prompt; ✕ removes it). Questions are then answered from the selection instead of the whole page. For example, "is this a good price?" gets a yes/no from the selection, "explain this" uses the text model, and "search for this" types the selection. **Ask Jev about this page** opens the panel without a selection.
+- **◨** in the popup header moves Docent into Chrome's side panel, which stays open while you click around the page. To make the toolbar icon always open the panel, set *Toolbar icon opens → Side panel* in ⚙.
+- Select text on any page, right-click, and choose **Ask Docent about "…"**. The side panel opens with the selection attached (shown as a chip above the prompt; ✕ removes it). Questions are then answered from the selection instead of the whole page. For example, "is this a good price?" gets a yes/no from the selection, "explain this" uses the text model, and "search for this" types the selection. **Ask Docent about this page** opens the panel without a selection.
 
 ## Find, hide and dim by meaning
 
@@ -105,7 +122,7 @@ It's used in two places, and only when Jev asks for it:
 - **Typing:** the `text` Choice gets a `compose` option ("the text isn't in the goal and has to be written"). If Jev picks it, the model writes the field's text from your goal, the page text and the field's label, e.g. *"reply to Ann saying I'll be there"*. The text it wrote is shown in the log. The usual risky-action check still runs before anything is sent.
 - **Open questions:** a new prompt kind, *explain* ("summarize this page", "what does this function do"), streams a written answer into the Answer card, labelled with the model that wrote it. A *lookup* that Jev can't find as a single item on the page also falls back to the model.
 
-Everything else (choosing actions, targets, yes/no, counts, lists) stays on Jev.
+Everything else (choosing actions, targets, yes/no, counts, lists) stays with the decision model (Jev or Laya).
 
 **How auth works:** the extension mints a short-lived (10 min) LiveKit access token with an `inference.perform` grant, signed HS256 with your API secret, the same token the LiveKit Agents SDK uses. It calls the OpenAI-compatible gateway (`https://agent-gateway.livekit.cloud/v1`, or the staging gateway if your URL is `*.staging.livekit.cloud`) at `/chat/completions` with streaming, and at `/models`. The secret is kept in `chrome.storage.local`, which is **not encrypted**, so use a key from a LiveKit project you're comfortable using for this.
 
@@ -165,6 +182,9 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `decider.js` | Jev or Laya: routes typed questions to the TypeSafe API or the in-browser model, and adapts them for Laya |
 | `laya-worker.js` | Laya in a module worker: download and cache the model, pick WebGPU or CPU, answer questions |
 | `vendor/laya/` | ONNX Runtime Web 1.30 (MIT), tokenizers.js (MIT) and layaForWeb's `laya-core.js` (Apache-2.0), with their licences and notice |
+| `pdfdoc.js` | PDFs: detect a PDF tab, extract and cache its text (via the offscreen document), reading chunks, turn the viewer's page |
+| `vendor/pdfjs/` | pdf.js 5.7 legacy build (Apache-2.0) and its CMaps, for reading PDFs |
+| `expressive.js` | Expressive podcasts: per-provider marker instructions and lowering to Cartesia/Fish Audio markup (port of LiveKit Agents' expressive mode) |
 | `podsource.js` | Podcast: number the page's blocks and images/charts, highlight and scroll to the ones being discussed |
 | `vendor/lamejs.mjs` | LAME MP3 encoder (LGPL-3.0, unmodified, licence in `vendor/LAME-LICENSE.txt`) for podcast downloads |
 | `podcast.js` | Podcast mode: two hosts and voices, streamed script writing, turn-by-turn playback with pause/resume |

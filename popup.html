@@ -2,15 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Jev</title>
+  <title>Docent</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
   <header>
     <img src="icons/icon32.png" alt="" width="20" height="20" />
-    <h1>Jev</h1>
+    <h1>Docent</h1>
     <span id="status" class="status"></span>
     <button id="panelBtn" class="icon" title="Open in side panel" aria-label="Open in side panel">◨</button>
+    <button id="clearBtn" class="icon" title="Clear history" aria-label="Clear history"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v6M14 11v6"/></svg></button>
     <button id="settingsBtn" class="icon" title="Settings" aria-label="Settings">⚙</button>
   </header>
 
@@ -104,12 +105,13 @@
     <label>Second podcast voice
       <select id="podcastVoice2"></select>
     </label>
+    <label class="check"><input id="podcastExpressive" type="checkbox" /> Expressive podcasts (emotion, pauses, laughs; Cartesia and Fish Audio voices)</label>
     <label>Speech-to-text model <select id="sttModel"></select></label>
     <label class="check"><input id="speakAnswers" type="checkbox" /> Always speak answers aloud</label>
     <p class="help">Answers are spoken automatically when you ask with the 🎤 or say "tell me" / "read it out". 🔊 reads the page (or your selection) aloud. 🎧 turns it into a two-host podcast.</p>
 
     <div class="row end">
-      <a href="https://console.typesafe.ai" target="_blank">Get a Jev key</a>
+      <a href="https://console.typesafe.ai" target="_blank">Get a TypeSafe key</a>
       <button id="saveSettings">Save</button>
     </div>
   </section>
@@ -120,7 +122,7 @@
       <span id="ctxText" class="ctx-text"></span>
       <button type="button" id="ctxClear" class="icon" title="Don't use the selection" aria-label="Remove selection">✕</button>
     </div>
-    <textarea id="prompt" rows="3" placeholder="What should Jev do on this page? e.g. search for &quot;mechanical keyboards&quot; and open the first result"></textarea>
+    <textarea id="prompt" rows="3" placeholder="What should Docent do on this page? e.g. search for &quot;mechanical keyboards&quot; and open the first result"></textarea>
     <div class="row end">
       <span class="hint">⌘/Ctrl + Enter</span>
       <button type="button" id="readBtn" class="secondary icon-btn" title="Read this page aloud" aria-label="Read this page aloud">🔊</button>

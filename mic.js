@@ -3,7 +3,7 @@ document.getElementById("allow").onclick = async () => {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((t) => t.stop());
-    status("Thanks! You can close this tab and click the mic in Jev again.");
+    status("Thanks! You can close this tab and click the mic in Docent again.");
     chrome.runtime.sendMessage({ type: "voice:micGranted" }).catch(() => {});
     setTimeout(() => window.close(), 1500);
   } catch (e) {

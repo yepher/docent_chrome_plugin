@@ -114,7 +114,8 @@ export async function speakStream(s, opts = {}) {
     // Keep an unfinished last sentence back until more text arrives.
     const keep = !all && parts.length && !/[.!?…]$/.test(buffer.trim()) ? parts.pop() : "";
     for (const p of parts) {
-      const clean = forSpeech(p);
+      // raw: text already prepared for this voice (e.g. expressive markup) — don't clean it
+      const clean = opts.raw ? p.trim() : forSpeech(p);
       if (clean) toOffscreen({ type: "tts:append", text: clean + " ", generation_config: gen });
     }
     buffer = keep;

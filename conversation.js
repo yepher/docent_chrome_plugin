@@ -1,4 +1,4 @@
-// Hands-free conversation: the mic stays open, each pause ends an utterance, Jev's
+// Hands-free conversation: the mic stays open, each pause ends an utterance, Docent's
 // reply is spoken, and you can talk over it to interrupt. Follow-ups ("what about
 // the second one?", "read it again", "go on") are rewritten into standalone requests
 // using the conversation so far, then run through the normal pipeline.
@@ -27,6 +27,13 @@ export class Conversation {
     this.phase = "off"; // off | listening | thinking | speaking
     this.queue = [];
     this.lastAnswer = "";
+  }
+
+  // Forget the exchange so far (the "Clear history" button); a live conversation keeps listening.
+  clearHistory() {
+    this.history = [];
+    this.lastAnswer = "";
+    this.d.notify(this.state());
   }
 
   state() {

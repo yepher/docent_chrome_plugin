@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Jev Browser Agent",
+  "name": "Docent",
   "version": "0.8.0",
-  "description": "Type or say a prompt and let TypeSafe Jev act on the current tab, answer questions about it, and read it aloud.",
+  "description": "A guide for the page you're on: ask questions, find or hide things by meaning, have it read aloud or turned into a podcast, or let it act for you. Decisions by TypeSafe Jev or Laya in your browser.",
   "action": {
-    "default_title": "Jev",
+    "default_title": "Docent",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
@@ -43,19 +43,19 @@
       "suggested_key": {
         "default": "Alt+J"
       },
-      "description": "Open the Jev prompt"
+      "description": "Open Docent"
     },
     "toggle-conversation": {
       "suggested_key": {
         "default": "Alt+Shift+J"
       },
-      "description": "Start or stop a hands-free conversation with Jev"
+      "description": "Start or stop a hands-free conversation with Docent"
     },
     "pause-speaking": {
       "suggested_key": {
         "default": "Alt+Shift+P"
       },
-      "description": "Pause or resume what Jev is saying"
+      "description": "Pause or resume what Docent is saying"
     }
   },
   "side_panel": {

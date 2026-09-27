@@ -13,7 +13,7 @@ import { buildOutline, extractRange } from "./outline.js";
 import { focusedItem, readItem } from "./items.js";
 import { chat } from "./lk.js";
 import { choice } from "./jev.js";
-import { decide, deciderReady, isLaya } from "./decider.js";
+import { decide, deciderReady, isLaya, deciderName } from "./decider.js";
 
 const LOCATE_PROMPT = `You locate content on a web page for a browser assistant.
 You get the page outline: one line per text block, in reading order, as
@@ -37,11 +37,15 @@ function outlineText(lines) {
   }).join("\n");
 }
 
+// "Podcast of this page", "summarize the whole paper": the whole page, no need to locate.
+const WHOLE_PAGE = /\b(this|the|whole|entire|full)\s+(web\s?)?(page|site|paper|document|pdf|doc)\b(?!\s+(section|part|paragraph|table|figure|chart))/i;
 const DEICTIC = /\b(this|current|that)\s+(post|article|item|tweet|story|comment|thread|message|email|review|entry|one|update|section|answer)\b|\blooking at\b|\bon (my |the )?screen\b|\bin front of me\b/i;
 
 // ctx: { tabId, goal, settings, llm, signal, log, inject(func, args) }
 // Returns { kind: "page" } or { kind: "item", text, first, label }.
 export async function pickTarget(ctx, purpose) {
+  if (WHOLE_PAGE.test(ctx.goal) && !DEICTIC.test(ctx.goal)) { ctx.log("info", "The whole page."); return { kind: "page" }; }
+  if (ctx.pdf) return pdfTarget(ctx, purpose);
   const { log, inject } = ctx;
   const outline = await inject(buildOutline, [700]).catch((e) => { log("warn", `Couldn't outline the page: ${e.message}`); return null; });
   if (!outline?.lines?.length) return fallbackFocused(ctx);
@@ -101,17 +105,46 @@ async function rangeWithJev(ctx, outline) {
         whole_page: "The request is about the whole page",
       }),
     },
-  }).catch((e) => { ctx.log("warn", `Couldn't ask Jev: ${e.message}`); return null; });
+  }).catch((e) => { ctx.log("warn", `Couldn't ask ${deciderName(ctx.settings)}: ${e.message}`); return null; });
   const a = res?.answers?.start;
   if (!a) return null;
-  if (a.choice === "whole_page") { ctx.log("info", "Jev: the whole page."); return "page"; }
+  if (a.choice === "whole_page") { ctx.log("info", `${deciderName(ctx.settings)}: the whole page.`); return "page"; }
   const start = cands.find((c) => c.id === a.choice);
   if (!start) return null;
   // End: just before the next candidate line that looks like this one (same kind, similar length).
   const next = cands.find((c) => c.i > start.i + 1 && c.heading === start.heading && c.link === start.link && Math.abs(c.len - start.len) < 60);
   const endI = next ? next.i - 1 : Math.min(lines.length - 1, start.i + 60);
-  ctx.log("info", `Jev: starts at "${start.text.slice(0, 60)}"`, `confidence ${Math.round(a.confidence * 100)}%`);
+  ctx.log("info", `${deciderName(ctx.settings)}: starts at "${start.text.slice(0, 60)}"`, `confidence ${Math.round(a.confidence * 100)}%`);
   return { start: start.id, end: lines[endI].id, label: start.text.slice(0, 80) };
+}
+
+// PDFs: the outline is the extracted paragraphs, labelled with their page. The text
+// model picks a section ("the conclusion", "section 3.2"); otherwise it's the whole PDF.
+const WHOLE_DOC = /\b(this|the|whole|entire|full)\s+(article|paper|pdf|document|doc|thing|report|study)\b/i;
+async function pdfTarget(ctx, purpose) {
+  const doc = ctx.pdf;
+  if (!ctx.llm || WHOLE_DOC.test(ctx.goal) || doc.paras.length < 4) { ctx.log("info", "The whole PDF."); return { kind: "page" }; }
+  const lines = doc.paras.slice(0, 700).map((p, i) => ({ id: `d${i}`, text: p.text, len: p.text.length, heading: p.heading, pos: `page ${p.page}` }));
+  let range = null;
+  try {
+    const out = await chat(ctx.llm, [
+      { role: "system", content: LOCATE_PROMPT },
+      { role: "user", content: `Request: ${ctx.goal}\n(The assistant will ${purpose} it.)\nThis is a PDF (${doc.title}); there is no screen position, each line is labelled with its page. A request about "this paper" or "this document" means {"scope":"page"}.\n\nOutline:\n${outlineText(lines)}` },
+    ], { signal: ctx.signal, maxTokens: 120 });
+    const j = JSON.parse((out.match(/\{[\s\S]*\}/) || ["{}"])[0]);
+    const at = (id) => lines.findIndex((l) => l.id === id);
+    if (j.scope !== "page" && at(j.start) >= 0) {
+      let s = at(j.start), e = at(j.end) >= 0 ? at(j.end) : Math.min(lines.length - 1, s + 40);
+      if (e < s) [s, e] = [e, s];
+      range = { from: s, to: e + 1, label: j.label || doc.paras[s].text.slice(0, 60) };
+    }
+  } catch (e) {
+    ctx.log("warn", `Couldn't locate it with the text model: ${e.message}`);
+  }
+  if (!range) { ctx.log("info", "The whole PDF."); return { kind: "page" }; }
+  ctx.log("info", `${ctx.llm.lkModel}: ${range.label} (page ${doc.paras[range.from].page}${doc.paras[range.to - 1].page !== doc.paras[range.from].page ? `–${doc.paras[range.to - 1].page}` : ""}).`);
+  const text = doc.paras.slice(range.from, range.to).map((p) => p.text).join("\n");
+  return { kind: "item", text, first: range.label, label: range.label, range: [range.from, range.to] };
 }
 
 async function fallbackFocused(ctx) {

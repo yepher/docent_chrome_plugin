@@ -65,22 +65,40 @@ export async function listModels(s) {
 }
 
 // Streams a chat completion. onDelta(textSoFar) is called as tokens arrive. Returns the full text.
-export async function chat(s, messages, { onDelta, signal, maxTokens = 800 } = {}) {
+// Reasoning models (OpenAI gpt-5*, o1/o3/o4…) think before answering, and the thinking
+// counts against max_completion_tokens. With a small limit they can spend it all and
+// return an empty answer, so ask for low effort and leave room for the thinking.
+export const isReasoningModel = (model) => /(^|\/)(gpt-5|o1|o3|o4)(\b|[-.])/i.test(model || "");
+const REASONING_HEADROOM = 4000;
+
+export async function chat(s, messages, opts = {}) {
+  const text = await chatOnce(s, messages, opts, false);
+  // Still empty because the limit ran out while thinking: try once more with no limit.
+  if (!text.trim() && chat.lastFinish === "length" && !opts.signal?.aborted) return chatOnce(s, messages, opts, true);
+  return text;
+}
+
+async function chatOnce(s, messages, { onDelta, signal, maxTokens = 800 } = {}, unlimited) {
   const model = s.lkModel || DEFAULT_MODEL;
+  const reasoning = isReasoningModel(model);
   const body = { model, messages, stream: true };
-  if (maxTokens) body.max_completion_tokens = maxTokens;
+  if (maxTokens && !unlimited) body.max_completion_tokens = maxTokens + (reasoning ? REASONING_HEADROOM : 0);
+  if (reasoning) body.reasoning_effort = "low";
   let res = await fetch(`${gatewayUrl(s)}/chat/completions`, { method: "POST", headers: await authHeaders(s), body: JSON.stringify(body), signal });
-  if (res.status === 400 && maxTokens) {
-    // Some providers reject max_completion_tokens; retry without it.
+  if (res.status === 400 && (body.reasoning_effort || body.max_completion_tokens)) {
+    // Some providers reject reasoning_effort or max_completion_tokens; retry without them.
+    delete body.reasoning_effort;
     delete body.max_completion_tokens;
     res = await fetch(`${gatewayUrl(s)}/chat/completions`, { method: "POST", headers: await authHeaders(s), body: JSON.stringify(body), signal });
   }
   if (!res.ok) throw explain(res.status, await res.text().catch(() => ""));
+  chat.lastFinish = null;
 
   const ctype = res.headers.get("content-type") || "";
   if (!ctype.includes("event-stream")) {
     const data = await res.json();
     const text = data.choices?.[0]?.message?.content ?? "";
+    chat.lastFinish = data.choices?.[0]?.finish_reason || null;
     onDelta?.(text);
     return text;
   }
@@ -100,7 +118,9 @@ export async function chat(s, messages, { onDelta, signal, maxTokens = 800 } = {
       const payload = line.slice(5).trim();
       if (payload === "[DONE]") return text;
       try {
-        const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
+        const choice = JSON.parse(payload).choices?.[0];
+        if (choice?.finish_reason) chat.lastFinish = choice.finish_reason;
+        const delta = choice?.delta?.content;
         if (delta) { text += delta; onDelta?.(text); }
       } catch (_) { /* partial or non-JSON line */ }
     }
