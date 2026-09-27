@@ -12,7 +12,8 @@ import { chat } from "./lk.js";
 const IDLE_MS = 120_000; // stop listening after 2 minutes of silence
 const CONTROL = [
   ["end", /^(ok(ay)?[, ]+)?(stop listening|goodbye|bye|good ?night|that'?s all|that is all|end (the )?(conversation|chat)|we'?re done|i'?m done|thanks,? that'?s (it|all))\b/i],
-  ["hush", /^(stop|pause|quiet|be quiet|shh+|hush|hold on|wait|enough|stop talking|cancel)\b[.!]?$/i],
+  ["pause", /^(pause|pause (it|that|reading)|hold on|hang on|wait|one (sec|second|moment)|just a (sec|second|moment))\b[.!]?$/i],
+  ["hush", /^(stop|quiet|be quiet|shh+|hush|enough|stop talking|cancel)\b[.!]?$/i],
   ["continue", /^(continue|go on|keep (reading|going)|resume|carry on|and then|what else)\b/i],
   ["repeat", /^(repeat( that)?|say (that|it) again|what did you say|come again|pardon|sorry\??)$/i],
 ];
@@ -95,9 +96,16 @@ export class Conversation {
     const text = this.queue.shift();
     if (!text) return;
     const said = text.trim();
-    const kind = (CONTROL.find(([, re]) => re.test(said)) || [])[0];
+    let kind = (CONTROL.find(([, re]) => re.test(said)) || [])[0];
 
     if (kind === "end") return this.end(true);
+    if (kind === "pause" && voice.state.speaking) {
+      // Freeze the audio where it is; "continue" / "resume" picks up mid-sentence.
+      await voice.pauseSpeaking();
+      this.set("listening");
+      return this.next();
+    }
+    if (kind === "pause") kind = "hush";
     if (kind === "hush") {
       this.d.abortRun();
       await voice.stopSpeaking();
@@ -107,6 +115,11 @@ export class Conversation {
     if (kind === "repeat" && this.lastAnswer) {
       this.set("speaking");
       await voice.speak(this.s, this.lastAnswer);
+      return this.next();
+    }
+    if (kind === "continue" && voice.state.paused) {
+      await voice.resumeSpeaking();
+      this.set("speaking");
       return this.next();
     }
     if (kind === "continue") {

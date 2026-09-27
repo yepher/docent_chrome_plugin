@@ -1,14 +1,44 @@
 # Jev Browser Agent (Chrome extension)
 
-Click the toolbar icon (or press **Alt+J**), type what you want done on the current page, and press **Run**. The extension uses TypeSafe's **Jev** model to drive the tab one step at a time.
+Click the toolbar icon (or press **Alt+J**), type what you want done on the current page, and press **Run**. The extension uses TypeSafe's **Jev** model to drive the tab one step at a time, or **Laya**, a similar decision model that runs entirely in your browser with no key (see [Jev or Laya](#jev-or-laya)).
 
 ## Install
 
 1. Open `chrome://extensions` and turn on **Developer mode**.
 2. Click **Load unpacked** and pick this folder.
-3. Open the popup, click ⚙, paste your TypeSafe API key (from [console.typesafe.ai](https://console.typesafe.ai)), and click **Save**.
+3. Open the popup, click ⚙, and either paste your TypeSafe API key (from [console.typesafe.ai](https://console.typesafe.ai)) or set *Who makes the decisions* to **Laya**. Click **Save**.
 
 No build step or dependencies are needed.
+
+## Jev or Laya
+
+⚙ → *Decision model* picks what makes the typed decisions (which kind of request, which element to click, does this post match, yes or no):
+
+| | Jev | Laya |
+| --- | --- | --- |
+| Where it runs | TypeSafe's API | In your browser (ONNX Runtime Web, WebGPU or CPU) |
+| Needs | A TypeSafe API key | A one-time download: 290 MB (int4) or 440 MB (int8), cached afterwards |
+| Page text sent out | To TypeSafe | Nowhere |
+| Speed | About a second a step | Seconds per question on CPU; faster with the GPU (int4 build) |
+| Accuracy | Best | Good at yes/no questions and find/hide by meaning; weaker at multi-step tasks |
+
+Laya is the English [Laya](https://huggingface.co/convaiinnovations/laya) checkpoint from ConvAI Innovations (Apache-2.0), converted for the browser by [layaForWeb](https://github.com/vishalmysore/layaForWeb). It takes the same `state` + typed `questions` as Jev and returns the same answers, so the rest of the extension doesn't change. It reads a shorter window (512 tokens of context, 1,024 for the typed-decisions checkpoint) and scores about 10 options per question well, so `decider.js` adapts the questions for it:
+
+- **Per-item checks** (find, hide, count, list) put each item's text in the context and ask a plain statement ("The text is one of the things meant by: sponsored posts"). On a test feed this got 22 to 23 of 24 right, against 16 to 18 for list-style questions.
+- **Many options** (which of 60 elements to click) go through knockout rounds of 10.
+- **Next step:** instead of Jev's "which action, then which element", Laya picks from concrete steps ("click link 'Sign in'", "type "red shoes" into text field 'Search'"), and the probability of the chosen step is its confidence.
+- **Understanding the prompt:** clear-cut wording is sorted by rules ("hide …", "how many …", "summarize …"), then by the text model if one is set up, and only then by Laya.
+- Fewer elements and items per pass (60 elements, 80 items), since each question costs real compute.
+
+The model runs in a module worker (`laya-worker.js`) started by the offscreen document, so it stays loaded while you browse. The extension pages are cross-origin isolated (`cross_origin_embedder_policy`), which lets the CPU build use several threads. *Download & load now* fetches it ahead of time; *Delete download* removes it from the browser. There are two checkpoints: **general** (default) and **typed decisions** (fine-tuned for typed decisions; in these tests it was better at telling tasks from questions and worse at picking the next step). The int8 build only runs on the CPU, because ONNX Runtime's WebGPU kernel supports 4-bit weights only.
+
+```mermaid
+flowchart LR
+  B[Service worker<br/>decider.js] -->|Jev selected| J[(api.typesafe.ai<br/>/v1/systemone)]
+  B -->|Laya selected| O[Offscreen document]
+  O --> W[laya-worker.js<br/>ONNX Runtime Web]
+  W -->|once, then Cache Storage| H[(Hugging Face<br/>layaForWeb builds)]
+```
 
 ## Voice: read aloud, spoken answers, ask by voice
 
@@ -16,6 +46,9 @@ Voice uses LiveKit Inference text-to-speech and speech-to-text with the same Liv
 
 - **🔊 Read this page aloud.** Reads the page's main text (article or main content, without navigation, headers and footers), or your selection if you right-clicked some text. "Read this page to me" typed in the prompt does the same. The whole page is read a chunk at a time (about two screens each), starting from what's on screen. When a chunk finishes, Jev takes the next one and scrolls down to it, expanding "…see more" as it goes. At the end of the loaded content it scrolls to the bottom so feeds load more posts, and it keeps going until nothing more appears ("That's the end of the page.") or you press ■ Stop. In a conversation, "stop" pauses and "continue" picks up at the sentence you stopped at.
 - **🎧 Podcast mode.** "Make this a podcast", "turn this post into a podcast" or the 🎧 button: the text model writes a short script for two hosts discussing the article, post, thread or selection (the same outline → locate → extract step picks the part you mean), and two different voices perform it. One host explains the piece and the other asks the questions a listener would. The first host starts talking as soon as the first line is written. It runs about 3 minutes by default; "a 5 minute podcast", "a quick podcast" or "a detailed podcast" change the length. The hosts are your main voice plus a contrasting one (⚙ → *Second podcast voice* to choose it). The Podcast card shows the transcript and follows the line being spoken. ■ Stop ends it; in a conversation, "stop" pauses and "continue" resumes at the same line.
+  - **It shows what they're talking about.** Before writing, the page (or the located post) is split into numbered text blocks `[p12]` and images, charts and videos `[m3]` (described by their alt text and caption, `podsource.js`). The script cites the blocks each line is about, e.g. `Blake: So sales doubled? [p14, m2]`. While that line plays, its text is highlighted in blue on the page, an image or chart it mentions gets a blue outline, and the page scrolls to bring it into view. The ids are never spoken or shown in the transcript.
+  - **⬇ Download MP3.** Saves the whole show to `Downloads/Jev podcasts/` to listen to later. Turns you've already heard are reused; the rest are synthesized without playing (faster than real time). Both voices are joined with short pauses and encoded as a 64 kbps mono MP3 with LAME (`vendor/lamejs.mjs`, LGPL). You can download without listening first: press ■ Stop, then ⬇.
+- **⏸ Pause / ▶ Resume.** While Jev is speaking, the voice bar has ⏸ Pause (or press **Alt+Shift+P**). It freezes the audio mid-word, along with the read-along highlight and scrolling, and ▶ Resume continues from the same spot. It works for page reading, podcasts and spoken answers. In a conversation, say "pause", "hold on" or "one second", then "continue" or "resume".
 - **What next?** After each run, a row of clickable suggestions appears under the answer, e.g. *Summarize this page*, *🎧 Make it a podcast*, *🔊 Read this page aloud*. With a text model set up, up to three page-specific ideas (marked ✦) are added, such as "Hide sponsored posts" on a feed. Clicking one stops anything being read out and runs it.
 - **Reading or summarizing one part of a page.** "Read the post I'm looking at", "read the post from Jane Doe", "summarize this article" or "what does the second comment say" work on just that part (`targets.js`):
   1. **Outline:** `outline.js` walks the page's text in the tab. Each text node belongs to its nearest block-level element, and each block becomes one outline line with an id, whether it's on screen, above or below, and whether it looks like a heading or a button. This doesn't depend on class names or page structure, so it copes with LinkedIn's hashed classes and uneven nesting.
@@ -62,49 +95,6 @@ Prompts like *"highlight reviews that mention battery life"*, *"hide sponsored r
 3. Matches (≥ 50%) are outlined, hidden or dimmed (dimmed items come back on hover). Items at 30–50% are listed as borderline and left alone.
 
 The Answer card lists the matches. Click one, or use ◀ ▶, to scroll to it. **Clear highlights / Show hidden** undoes it. **Save as rule for <site>** keeps it: saved rules re-apply whenever a page on that site loads, and to new items as they appear (infinite scroll or app updates, via a MutationObserver). Only the new items are checked. The toolbar badge shows how many items rules hid or dimmed on the current tab. Rules for the current site are listed under the log, where you can switch each one off or delete it.
-
-## Site skills: Onshape
-
-Some web apps can't be driven through the page's HTML. In Onshape the toolbar is icons, the 3D view is a WebGL canvas, and a feature is a multi-step dialog, so the generic agent has nothing it can reliably click. For those sites the extension uses a **site skill**: a module that knows the app and works through the app's own API with your logged-in session, the same way your FeatureScript Exporter reads documents.
-
-`skill_onshape.js` takes over on any `cad.onshape.com/documents/…/w/…/e/…` tab when the prompt is a modelling request:
-
-```mermaid
-flowchart LR
-  R[Prompt] --> J{Jev: what shape?}
-  J -->|cube / box / cylinder / hole| P1[Jev picks each dimension<br/>from the numbers in the prompt]
-  J -->|complex| L[Text model writes a JSON plan<br/>code validates it]
-  L --> V{Jev: does the plan<br/>match the request?}
-  V -->|unsure| C[Ask you to confirm]
-  V -->|yes| B
-  C --> B
-  P1 --> B[POST features to the Part Studio<br/>sketch + extrude, or the std cube]
-  J -->|not modelling| G[Generic agent]
-  B --> U[Onshape re-renders · Undo button removes them]
-```
-
-- **Jev alone** handles a cube, box, cylinder or through-hole. It chooses the shape, and for each dimension it picks one of the numbers in your prompt (e.g. "60x40x20 mm" or "⌀20 mm, 40 mm tall"), or "not given", which falls back to a stated default.
-- **Anything more complex** ("a 60×40×20 block with four 5 mm holes 8 mm from the corners") needs the text model. It writes a plan in a small typed vocabulary: boxes, cubes and cylinders on the Top, Front or Right plane, as new, add or remove operations, sized in mm. Code validates the plan, Jev checks it matches your request, and if Jev is under 50% sure you're asked to confirm the plan first.
-- Each operation becomes a sketch (rectangle or circle) plus an extrude, or the standard cube feature. If Onshape reports an error, everything added in that run is deleted again. **Remove what Jev added** in the Answer card deletes the features afterwards; Onshape's own undo works too.
-- Requests that aren't about geometry ("share this with Bob") go to the generic agent.
-
-The generic agent also reads better labels for icon-only buttons now: tooltips, `data-*` titles, SVG titles and icon sprite names such as `#svg-icon-extrude-button`.
-
-## Playing chess
-
-The generic agent can't play chess. The pieces aren't buttons, and a game never finishes after one click (the first try clicked "Play as White" and reported done). So prompts that mention chess hand off to `skill_chess.js` once a board with your colour at the bottom is on the page. Before that, the normal agent handles setup, e.g. clicking "Play as Black".
-
-Each move, code stays in control and Jev makes one decision:
-
-1. **Read the position.** The skill uses a chess.js instance if the page has one (read from the page's own JavaScript). Otherwise it reads the board's `data-square` / `data-piece` markup (chessboard.js).
-2. **Annotate every legal move in code** using a vendored copy of chess.js (`vendor/chess.mjs`, BSD-2): captures, checks, checkmate, promotion, "allows checkmate next move", and an estimate of material won or hung one move deep.
-3. **Play a mate in one if there is one.** Drop moves that allow mate, and keep only moves within a pawn of the best material outcome.
-4. **Jev picks.** One Choice over the remaining moves: "which is the strongest move for White here?". The state is the FEN, a piece list and recent moves, and each option carries its annotation. The log shows the move, its confidence and the runners-up.
-5. **Make the move** by clicking the two squares, falling back to a mouse drag. Then wait for the opponent's reply (up to 2 minutes) and repeat until checkmate or a draw.
-
-Tested end to end on jevfish.patebryant.com. It plays a full game, and its strength depends on Jev's choices plus one move of lookahead. It isn't meant for rated play on chess.com or lichess, where engine help breaks their fair-play rules, and it doesn't read their boards.
-
-The generic agent also gained a **wait** action (the page is updating, or it's the other side's turn), and "done" now means an ongoing activity has actually finished.
 
 ## Text model (optional, LiveKit Inference)
 
@@ -171,10 +161,12 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `jev.js` | `/v1/systemone` client with retry/backoff on 429/529 |
 | `items.js` | Injected functions for find/hide: page segmentation, marking, jump-to, mutation watcher, selection |
 | `rules.js` | Per-item judging with cache, one-off find/hide, saved per-site rules and auto-apply |
-| `skill_onshape.js` | Onshape: plan (Jev, or text model + Jev check), build features through the Part Studio API with the session, undo |
-| `skill_chess.js` | Chess: read the position, annotate legal moves, Jev picks, click/drag the move, wait for the reply |
-| `vendor/chess.mjs` | chess.js 0.10.3 (BSD-2-Clause) with an ES-module export appended |
 | `conversation.js` | Hands-free conversation: turn-taking, spoken commands, follow-up rewriting, idle timeout |
+| `decider.js` | Jev or Laya: routes typed questions to the TypeSafe API or the in-browser model, and adapts them for Laya |
+| `laya-worker.js` | Laya in a module worker: download and cache the model, pick WebGPU or CPU, answer questions |
+| `vendor/laya/` | ONNX Runtime Web 1.30 (MIT), tokenizers.js (MIT) and layaForWeb's `laya-core.js` (Apache-2.0), with their licences and notice |
+| `podsource.js` | Podcast: number the page's blocks and images/charts, highlight and scroll to the ones being discussed |
+| `vendor/lamejs.mjs` | LAME MP3 encoder (LGPL-3.0, unmodified, licence in `vendor/LAME-LICENSE.txt`) for podcast downloads |
 | `podcast.js` | Podcast mode: two hosts and voices, streamed script writing, turn-by-turn playback with pause/resume |
 | `karaoke.js` | Read-along highlight: find spoken sentences on the page, highlight and follow the current one; progressive page reader (next chunk, load more) |
 | `voice.js` | Voice: TTS/STT sessions, gateway auth rule, text clean-up for speech, suggested voices |
@@ -189,5 +181,6 @@ The agent runs in the background service worker, so you can close the popup; reo
 
 - Without a text model configured, it can't type text that isn't in your prompt, and it can't answer open questions.
 - It doesn't see inside iframes, shadow DOM or canvas, and it can't run on `chrome://` pages or the Chrome Web Store.
-- Saved rules send the text of each new page item (up to 400 characters each) to TypeSafe as pages on that site load and scroll.
-- It sends the page's URL, title, the first ~1500 characters of visible text, and element labels to TypeSafe. With a text model set up, it also sends up to ~16,000 characters of page text to LiveKit Inference when it writes text or answers an open question. Password values are never sent.
+- Saved rules send the text of each new page item (up to 400 characters each) to TypeSafe as pages on that site load and scroll (with Jev; with Laya nothing leaves the browser).
+- Laya is noticeably less reliable than Jev at multi-step tasks and subtle matches, and on a CPU a step can take several seconds. Its confidence numbers aren't comparable to Jev's.
+- With Jev, it sends the page's URL, title, the first ~1500 characters of visible text, and element labels to TypeSafe. With a text model set up, it also sends up to ~16,000 characters of page text to LiveKit Inference when it writes text or answers an open question. Password values are never sent.

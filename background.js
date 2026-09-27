@@ -6,25 +6,29 @@
 //   submit   – whether to press Enter after typing
 // All of these are asked together in one request per step (speculative fan-out).
 
-import { systemOne, choice, noul } from "./jev.js";
+import { choice, noul } from "./jev.js";
+import { decide, isLaya, deciderReady, layaLoad, layaStatus, layaClear, layaJudge } from "./decider.js";
 import { textCandidates, urlCandidates } from "./candidates.js";
 import { snapshotPage, performAction, highlightElements, pageText, readableText } from "./page.js";
 import * as voice from "./voice.js";
 import { Conversation } from "./conversation.js";
 import { Podcast, hostsFor } from "./podcast.js";
 import { prepareReadAlong, highlightSentence, clearReadAlong, nextReadingChunk, loadMoreBelow } from "./karaoke.js";
+import { podcastSource, showPodcastRefs, clearPodcastRefs } from "./podsource.js";
 import { chat, lkConfigured, DEFAULT_MODEL } from "./lk.js";
 import { focusRef, clearMarks, getSelectionText } from "./items.js";
 import { pickTarget as pickTargetFromOutline } from "./targets.js";
-import { isChessGoal, colorFromGoal, readChessState, playChess } from "./skill_chess.js";
-import { Chess } from "./vendor/chess.mjs";
-import { onshapeContext, runOnshape, undoOnshape } from "./skill_onshape.js";
 import { modeFor, runFilter, applyRules, reapplyRules, getRules, saveRule, updateRule, deleteRule, forgetTab } from "./rules.js";
 
 export const DEFAULTS = {
   apiKey: "",
   model: "jev-latest",
   apiBase: "https://api.typesafe.ai",
+  // Decision model: "jev" (TypeSafe API), or Laya in the browser: "laya-typed" / "laya"
+  decider: "jev",      // "jev" | "laya" (general) | "laya-typed"
+  layaBuild: "q4e8",   // q4e8 (290 MB, WebGPU-capable) or q8e8 (440 MB, CPU, closer to the original)
+  layaDevice: "auto",  // auto | webgpu | wasm
+  layaModelBase: "",   // advanced: self-hosted model folder (default: the layaForWeb builds on Hugging Face)
   maxSteps: 15,
   minConfidence: 0.3,
   confirmRisky: true,
@@ -64,6 +68,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (run?.status === "running" || run?.status === "confirm") return { error: "A task is already running." };
         const sg = (run?.suggestions || [])[msg.index];
         if (!sg) return { error: "That suggestion is gone." };
+        if (sg.mode === "download") { downloadPodcast(); return publicRun(); }
         const keepSel = run.tabId === msg.tabId ? run.selection || "" : "";
         stopReadingOut();
         await voice.stopSpeaking();
@@ -76,6 +81,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "voice:stop":
         stopReadingOut();
         await voice.stopSpeaking();
+        return { ...voice.state };
+      case "jev:podcastDownload":
+        return downloadPodcast();
+      // ---- Laya (in-browser decision model) ----
+      case "laya:progress":
+        onLayaProgress(msg);
+        return { ok: true };
+      case "laya:load":
+        return layaLoad({ ...(await loadSettings()), ...(msg.settings || {}) }).then((info) => ({ info }), (e) => ({ error: e.message }));
+      case "laya:status":
+        return layaStatus().catch((e) => ({ error: e.message }));
+      case "laya:clear":
+        return layaClear().catch((e) => ({ error: e.message }));
+      case "voice:pause":
+        await voice.pauseSpeaking();
+        return { ...voice.state };
+      case "voice:resume":
+        await voice.resumeSpeaking();
+        return { ...voice.state };
+      case "voice:togglePause":
+        await (voice.state.paused ? voice.resumeSpeaking() : voice.pauseSpeaking());
         return { ...voice.state };
       case "voice:speakText": {
         const s = await loadSettings();
@@ -110,7 +136,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         convo.onEvent(msg).catch(() => {});
         onReadAlongEvent(msg);
         podcast?.onVoiceEvent(msg);
-        if (["tts-done", "tts-error"].includes(msg.kind)) voice.state.speaking = false;
+        if (msg.kind === "pod-export-progress") lastPodcast?.onProgress?.(msg.done, msg.total);
+        if (["tts-done", "tts-error"].includes(msg.kind)) voice.state.speaking = voice.state.paused = false;
+        if (msg.kind === "tts-started") { voice.state.speaking = true; voice.state.paused = false; }
         if (["stt-stopped", "stt-error", "mic-denied"].includes(msg.kind)) voice.state.listening = false;
         if (msg.kind === "mic-denied" && convo.active) convo.end(false);
         if (msg.kind === "mic-denied") chrome.tabs.create({ url: chrome.runtime.getURL("mic.html") });
@@ -141,17 +169,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const rules = await deleteRule(msg.id);
         if (msg.tabId) await reapplyRules(await loadSettings(), msg.tabId).catch(() => {});
         return { rules };
-      }
-      case "jev:undoSkill": {
-        const u = run?.answer?.undo;
-        if (!u) return { removed: 0 };
-        if (u.kind === "onshape") {
-          const removed = await undoOnshape((func, args) => inject(u.tabId, func, args), u);
-          run.answer.undo = null;
-          log("info", `Removed ${removed} feature${removed === 1 ? "" : "s"} Jev added.`);
-          return { removed };
-        }
-        return { removed: 0 };
       }
       case "jev:mutated":
         if (sender.tab?.id != null) applyRules(await loadSettings(), sender.tab.id, true).catch(() => {});
@@ -233,9 +250,9 @@ async function agentLoop(r) {
     return readAloud(r, s);
   }
   if (r.podcast) return makePodcast(r, s);
-  if (!s.apiKey) throw new Error("No TypeSafe API key. Open Settings in the popup and paste your key.");
-  const ask = (state, questions) =>
-    systemOne({ apiBase: s.apiBase, apiKey: s.apiKey, model: s.model, state, questions, signal: r.abort.signal });
+  if (!deciderReady(s)) throw new Error("No TypeSafe API key. Open Settings and paste your key, or choose Laya (runs in your browser, no key needed).");
+  const ask = (state, questions) => decide(s, { state, questions, signal: r.abort.signal });
+  if (isLaya(s)) await ensureLaya(r, s);
 
   // Selected text (from the right-click menu) is the likeliest thing to type.
   const texts = [...new Set([...(r.selection ? [r.selection.slice(0, 500)] : []), ...textCandidates(r.goal)])].slice(0, 250);
@@ -256,52 +273,15 @@ async function agentLoop(r) {
   if (kind === "podcast") return makePodcast(r, s);
   if (kind !== "task") return answerQuestion(r, ask, kind, llm, s);
 
-  // Site skills: apps the generic DOM agent can't operate (canvas UIs, dialogs) get a
-  // purpose-built skill that works through the app's own API.
-  const tab = await chrome.tabs.get(r.tabId);
-  if (onshapeContext(tab.url)) {
-    log("info", "Onshape document detected: using the Onshape skill (builds features through Onshape's API).");
-    const res = await runOnshape({
-      tabId: r.tabId, url: tab.url, goal: r.goal, signal: r.abort.signal, ask, llm,
-      log: (k, t, d) => log(k, t, d),
-      inject: (func, args) => inject(r.tabId, func, args),
-      confirm: (label) => askUser(r, label),
-    });
-    if (res) {
-      if (res.answer) r.answer = res.answer;
-      return finish(res.status, res.text);
-    }
-    log("info", "Not a modelling request; handing over to the general agent.");
-  }
-
-  const chessGoal = isChessGoal(r.goal);
   let waits = 0;
 
   for (r.step = 1; r.step <= s.maxSteps; r.step++) {
     if (r.abort.signal.aborted) return;
     await settle(r.tabId);
 
-    // Chess: once there's a playable board with our colour at the bottom, the chess skill takes over.
-    if (chessGoal) {
-      const st = await injectMain(r.tabId, readChessState, []).catch(() => null);
-      if (st) {
-        const want = colorFromGoal(r.goal) || st.orientation || "w";
-        const over = st.fen ? new Chess(st.fen).game_over() : false;
-        if (!over && (!st.orientation || st.orientation === want)) {
-          const res = await playChess({
-            tabId: r.tabId, goal: r.goal, signal: r.abort.signal, ask,
-            log: (k, t, d) => log(k, t, d),
-            injectMain: (func, args) => injectMain(r.tabId, func, args),
-          }, want);
-          if (res.status === "done") r.answer = { text: res.text, note: "Game over.", items: [] };
-          return finish(res.status, res.text);
-        }
-      }
-    }
-
     let snap;
     try {
-      snap = await inject(r.tabId, snapshotPage, [MAX_ELEMENTS, PAGE_TEXT_CHARS]);
+      snap = await inject(r.tabId, snapshotPage, [isLaya(s) ? 60 : MAX_ELEMENTS, isLaya(s) ? 600 : PAGE_TEXT_CHARS]);
     } catch (e) {
       throw new Error(`Can't read this page (${e.message}). Chrome blocks extensions on chrome:// pages, the Web Store and some viewers.`);
     }
@@ -361,7 +341,9 @@ async function agentLoop(r) {
     if (actions.select) questions.select_target = targetQ("changed (dropdown)", selects);
     if (actions.open_url) questions.url = choice("Which web address from the goal should be opened?", Object.fromEntries(urls.map((u) => [u, null])));
 
-    const res = await ask(state, questions);
+    let res;
+    if (isLaya(s)) res = await layaStep(ask, r, state, questions, { clickables, fields, selects, actions, texts, urls });
+    else res = await ask(state, questions);
     const A = res.answers;
     const act = A.action;
     const top = topN(act.probabilities, 3);
@@ -497,6 +479,44 @@ async function agentLoop(r) {
   finish("stopped", `Reached the ${s.maxSteps}-step limit. Raise it in Settings if the task needs more steps.`);
 }
 
+// Laya picks the next step better from a list of concrete steps ("click link 'Sign in'",
+// "type \"red shoes\" into text field 'Search'") than from Jev's action-then-target
+// questions. The pick is mapped back to the same answers the loop uses; for a typing
+// step the text and Enter questions follow. Laya's confidence runs lower than Jev's, so
+// the probability of the chosen step is used as its confidence.
+async function layaStep(ask, r, state, questions, { clickables, fields, selects, actions, texts }) {
+  const say = (t) => (t.length > 40 ? `"${t.slice(0, 37)}…"` : `"${t}"`);
+  const opts = {};
+  for (const e of fields) if (actions.type) opts[`type:${e.id}`] = `type ${texts[0] ? say(texts[0]) : "text"} into ${e.desc}`;
+  for (const e of clickables) opts[`click:${e.id}`] = `click ${e.desc}`;
+  for (const e of selects) opts[`select:${e.id}`] = `choose an option in ${e.desc}`;
+  if (actions.scroll_down) opts.scroll_down = "scroll down to see more of the page";
+  if (actions.go_back) opts.go_back = "go back to the previous page";
+  if (actions.open_url) opts.open_url = "open the web address written in the goal";
+  opts.wait = "wait for the page to finish loading";
+  opts.done = "nothing: the goal is already complete";
+  const res = await ask(
+    { goal: state.goal, steps_done: state.actions_taken_so_far, current_page: { url: state.current_page.url, title: state.current_page.title } },
+    { next: choice("Which is the single next browser step toward `goal`, given `steps_done`? Don't repeat a step that already worked.", opts) }
+  );
+  const a = res.answers.next;
+  const [kind, id] = a.choice.split(":");
+  const p = a.probabilities[a.choice] ?? a.confidence;
+  const byKind = {};
+  for (const [k, v] of Object.entries(a.probabilities)) byKind[k.split(":")[0]] = (byKind[k.split(":")[0]] || 0) + v;
+  const answers = { action: { choice: kind, probabilities: byKind, confidence: p } };
+  const target = { choice: id, probabilities: { [id]: p }, confidence: p };
+  if (kind === "click") answers.click_target = target;
+  if (kind === "select") answers.select_target = target;
+  if (kind === "type") {
+    answers.type_target = target;
+    const more = await ask(state, { text: questions.text, submit: questions.submit });
+    Object.assign(answers, more.answers);
+  }
+  if (kind === "open_url" && questions.url) Object.assign(answers, (await ask(state, { url: questions.url })).answers);
+  return { answers };
+}
+
 // ---------- questions about the page ----------
 const PROMPT_KINDS = {
   task: "An instruction to do something in the browser: click, type, search, navigate, open, fill in, change, buy or send something",
@@ -510,7 +530,71 @@ const PROMPT_KINDS = {
 
 const EXPLAIN_KIND = "A request for a written answer about the current page: summarize, explain, describe, compare, translate, or an open question that isn't yes/no, a count, a list or one value";
 
+// Laya is weaker than Jev at sorting prompts into many kinds, so with Laya: clear-cut
+// phrasings are sorted by rules, then the text model (if set up), then Laya.
+const QUICK_KINDS = [
+  ["podcast", /\bpodcast\b|\b(discussion|conversation) (i|we) can listen/i, true],
+  ["read", /^(please )?(read|narrate)\b(?!.*\b(and|then) (summari|explain|tell))/i, true],
+  ["explain", /^(please )?(summari[sz]e|explain|describe|translate|tl;?dr|give me (a|the) (summary|gist|key points)|what('?s| is) (this|the) (page|article|post|thread) about)/i, true],
+  ["count", /^how many\b/i],
+  ["hide", /^(please )?(hide|remove|filter out|dim|fade|get rid of|mute)\b/i],
+  ["find", /^(please )?(highlight|mark|outline|show me where)\b/i],
+  ["list", /^(which|list)\b/i],
+  ["yes_no", /^(is|are|does|do|did|can|could|has|have|was|were|will|should)\b.*\?\s*$/i],
+  ["task", /^(please )?(click|open|go to|visit|search|type|fill|enter|add|buy|order|sign (in|up|out)|log ?(in|out)|navigate|scroll|press|select|choose|play|draw|create|make (a|an) (?!podcast)|send|post|reply|like|follow|subscribe|download|book|reserve|compose|write)\b/i],
+];
+const WANTS_VOICE = /\b(tell me|say it|out loud|aloud|read (it|that|them) (out|to me)|speak)\b/i;
+
+async function classifyWithoutJev(r, llm, kinds) {
+  const goal = r.goal.trim();
+  if (WANTS_VOICE.test(goal) && llm) r.speak = true;
+  for (const [kind, re, needsLlm] of QUICK_KINDS) {
+    if (needsLlm && !llm) continue;
+    if (re.test(goal)) { log("info", `Understood as: ${kind.replace("_", "/")}`, "from the wording"); return kind; }
+  }
+  if (!llm) return null;
+  const out = await chat(llm, [
+    { role: "system", content: `Classify a request made to a browser assistant about the web page the user is on. Reply with only one of these keys:
+${Object.entries(kinds).map(([k, d]) => `${k}: ${d}`).join("\n")}` },
+    { role: "user", content: `${r.selection ? `(The user selected some text on the page.)\n` : ""}Request: ${goal}` },
+  ], { maxTokens: 8, signal: r.abort.signal }).catch(() => "");
+  const k = (out.toLowerCase().match(/[a-z_]+/) || [])[0];
+  if (k && kinds[k]) { log("info", `Understood as: ${k.replace("_", "/")}`, `by ${llm.lkModel || DEFAULT_MODEL}`); return k; }
+  return null;
+}
+
+// Laya: make sure the model is loaded, showing download/start-up progress in the log.
+let layaProgressEntry = null;
+async function ensureLaya(r, s) {
+  const st = await layaStatus().catch(() => null);
+  if (st?.info) return;
+  log("info", "Loading Laya, the in-browser decision model…", "The first time, this downloads the model once (about 290 MB for the int4 build). After that it loads from the browser's cache.");
+  layaProgressEntry = r.log.at(-1);
+  try {
+    const info = await layaLoad(s);
+    layaProgressEntry.text = `Laya ready: ${info.checkpoint === "laya" ? "general" : "typed-decisions"} model, ${info.device === "webgpu" ? "WebGPU" : `CPU (${info.threads} thread${info.threads === 1 ? "" : "s"})`}, ${Math.round(info.loadMs / 1000)} s to load${info.fromCache ? " from cache" : ""}.`;
+    layaProgressEntry.detail = undefined;
+    publish();
+  } finally {
+    layaProgressEntry = null;
+  }
+}
+let lastLayaPublish = 0;
+function onLayaProgress(msg) {
+  if (!layaProgressEntry || !run) return;
+  layaProgressEntry.text = msg.text;
+  if (Date.now() - lastLayaPublish > 250) { lastLayaPublish = Date.now(); publish(); }
+}
+
 async function classifyPrompt(r, ask, llm) {
+  if (isLaya(r.settings)) {
+    const kinds0 = llm
+      ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, read: "A request to read the page, the article or the selected text out loud, word for word",
+          podcast: "A request to turn the page, article, post, thread or selected text into a podcast, or a spoken discussion or conversation between two voices to listen to" }
+      : PROMPT_KINDS;
+    const k = await classifyWithoutJev(r, llm, kinds0);
+    if (k) return k;
+  }
   const snap = await inject(r.tabId, snapshotPage, [60, 600]).catch(() => null);
   const kinds = llm
     ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, read: "A request to read the page, the article or the selected text out loud, word for word",
@@ -547,14 +631,16 @@ async function answerQuestion(r, ask, kind, llm, s) {
     snap = { url: tab.url, title: tab.title, text: r.selection.slice(0, 4000) };
     items = [...new Set(parts)].slice(0, 250).map((t) => ({ text: t, desc: `text "${t.slice(0, 300)}"` }));
   } else {
-    snap = await inject(r.tabId, snapshotPage, [250, 4000]);
+    snap = await inject(r.tabId, snapshotPage, [isLaya(s) ? 80 : 250, 4000]);
     if (!snap) throw new Error("Couldn't read the page.");
     // Items = interactive elements (with their link targets, which carry meaning)
     // plus text lines that aren't already an element's label.
     const names = new Set(snap.elements.map((e) => (e.name || "").toLowerCase()));
     items = snap.elements.map((e) => ({ id: e.id, text: e.name || e.desc, desc: e.desc }));
+    const cap = isLaya(s) ? 80 : 250;
+    items = items.slice(0, cap);
     for (const line of snap.lines) {
-      if (items.length >= 250) break;
+      if (items.length >= cap) break;
       if (!names.has(line.toLowerCase())) items.push({ text: line, desc: `text "${line}"` });
     }
   }
@@ -603,6 +689,11 @@ async function answerQuestion(r, ask, kind, llm, s) {
     }
   } else {
     // count / list: one yes/no per item, tallied in code.
+    let res;
+    if (isLaya(s)) {
+      const ps = await layaJudge(s, items.map((x) => x.text), r.goal, r.abort.signal);
+      res = { answers: Object.fromEntries(ps.map((p, i) => [`i${i}`, { noul: p }])) };
+    }
     const questions = {};
     items.forEach((_, i) => {
       questions[`i${i}`] = noul(`Is \`items[${i}]\` one of the things that \`question\` is asking about?`, {
@@ -610,7 +701,7 @@ async function answerQuestion(r, ask, kind, llm, s) {
         false: "It is something else, such as navigation, a label, a description or a different kind of thing",
       });
     });
-    const res = await ask({ question: r.goal, current_page: page, items: items.map((x) => x.desc) }, questions);
+    if (!res) res = await ask({ question: r.goal, current_page: page, items: items.map((x) => x.desc) }, questions);
     const seen = new Set();
     const matched = [], unsure = [];
     items.forEach((it, i) => {
@@ -811,21 +902,56 @@ function stopReadingOut() {
 
 // ---------- podcast mode ----------
 let podcast = null; // the Podcast being written / performed (see podcast.js)
+let lastPodcast = null; // { pod, title, run }: kept after it ends, for ⬇ Download
+
+// Render the last podcast to an MP3 and save it with Chrome's downloads.
+async function downloadPodcast() {
+  const lp = lastPodcast;
+  if (!lp?.pod.scriptDone || !lp.pod.turns.length) return { error: "There's no finished podcast script to download yet." };
+  if (lp.busy) return { error: "Already preparing the download." };
+  lp.busy = true;
+  const a = lp.run.answer;
+  const setDl = (dl) => { if (a?.podcast) { a.dl = dl; publish(); } };
+  setDl({ state: "rendering", done: 0, total: lp.pod.turns.length });
+  lp.onProgress = (done, total) => setDl({ state: "rendering", done, total });
+  try {
+    const res = await lp.pod.exportAudio();
+    if (!res || res.error) throw new Error(res?.error || "The audio couldn't be made.");
+    const safe = lp.title.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "podcast";
+    const id = await chrome.downloads.download({ url: res.url, filename: `Jev podcasts/${safe}.${res.ext}`, conflictAction: "uniquify" });
+    const mins = Math.floor(res.seconds / 60), secs = String(res.seconds % 60).padStart(2, "0");
+    setDl({ state: "saved", id, ext: res.ext, text: `Saved ${res.ext.toUpperCase()} · ${mins}:${secs} · ${(res.bytes / 1048576).toFixed(1)} MB` });
+    if (run) log("info", `Podcast audio saved to Downloads/Jev podcasts/${safe}.${res.ext} (${mins}:${secs}).`);
+    return { ok: true, id };
+  } catch (e) {
+    setDl({ state: "error", text: e.message });
+    return { error: e.message };
+  } finally {
+    lp.busy = false;
+  }
+}
 
 async function makePodcast(r, s) {
   if (!lkConfigured(s)) throw new Error("Podcast mode uses LiveKit Inference (text model and voices). Add your LiveKit URL, key and secret in Settings.");
   r.kind = "podcast";
   const tab = await chrome.tabs.get(r.tabId);
-  let title = tab.title, text, what;
+  let title = tab.title, text, what, cited = false;
   if (r.selection) {
     text = r.selection; what = "the selection";
   } else {
     const target = await pickTarget(r, s, "turn into a podcast");
-    if (target.kind === "item") {
-      text = target.text; what = `"${target.first.slice(0, 60)}"`;
+    what = target.kind === "item" ? `"${target.first.slice(0, 60)}"` : "the page";
+    // Number the blocks, images and charts so the script can say which part each line is
+    // about; while it plays, that part is highlighted and scrolled into view.
+    const src = await inject(r.tabId, podcastSource, [target.start || null, target.end || null, 16000]).catch(() => null);
+    if (src?.blocks >= 2) {
+      text = src.text; cited = true;
+      log("info", `Numbered ${src.blocks} text blocks${src.media ? ` and ${src.media} image${src.media === 1 ? "" : "s"}/chart${src.media === 1 ? "" : "s"}` : ""} so the hosts can point at them.`);
+    } else if (target.kind === "item") {
+      text = target.text;
     } else {
       const page = await inject(r.tabId, pageText, [16000]).catch(() => null);
-      text = page?.text || ""; what = "the page";
+      text = page?.text || "";
     }
   }
   if (!text.trim()) return finish("stopped", "Couldn't find text on this page to talk about.");
@@ -839,6 +965,8 @@ async function makePodcast(r, s) {
     settings: s,
     hosts,
     log: (k, t) => { if (run === r) log(k, t); },
+    onTurn: (t) => { if (cited) inject(r.tabId, showPodcastRefs, [t.refs || []]).catch(() => {}); },
+    onEnd: () => { if (cited) inject(r.tabId, clearPodcastRefs, []).catch(() => {}); },
     onUpdate: (p) => {
       if (!r.answer?.podcast) return;
       r.answer.text = p.transcript() || "Writing the script…";
@@ -851,24 +979,26 @@ async function makePodcast(r, s) {
     },
   });
   podcast = pod;
+  lastPodcast = { pod, title: `Podcast - ${title}`, run: r };
   r.answer = { text: "Writing the script…", note: `${hosts[0].name} & ${hosts[1].name}`, items: [], long: true, spoken: true, podcast: true };
   log("info", `Podcast of ${what}: ${hosts[0].name} and ${hosts[1].name} will discuss it.`);
   pod.play().catch((e) => log("warn", `Podcast: ${e.message}`));
   try {
-    await pod.write({ title, url: tab.url, text: text.slice(0, 16000), goal: r.goal, signal: r.abort.signal });
+    await pod.write({ title, url: tab.url, text: text.slice(0, cited ? 20000 : 16000), goal: r.goal, signal: r.abort.signal, cited });
   } catch (e) {
     pod.stop();
     throw e;
   }
   if (!pod.turns.length) { pod.stop(); return finish("error", "The text model didn't return a script."); }
   const words = pod.turns.reduce((n, t) => n + t.text.split(/\s+/).length, 0);
+  r.answer.downloadable = true;
   finish("done", `Script ready: ${pod.turns.length} turns, about ${Math.max(1, Math.round(words / 150))} min. Playing now.`);
 }
 
 // ---------- what next? (clickable suggestions after a run) ----------
 const SUGGEST = {
   read: ["Summarize this page", "podcast", "What are the key takeaways?"],
-  podcast: ["Summarize this page", "read", "What are the key takeaways?"],
+  podcast: ["download", "Summarize this page", "read"],
   explain: ["podcast", "read", "What are the key takeaways?"],
   task: ["Summarize this page", "What can I do on this page?"],
   default: ["Summarize this page", "podcast", "read"],
@@ -876,6 +1006,7 @@ const SUGGEST = {
 function staticSuggestions(r) {
   const sel = !!r.selection;
   const make = (x) => x === "read" ? { label: sel ? "Read the selection aloud" : "Read this page aloud", goal: sel ? "Read the selected text aloud" : "Read this page aloud", mode: "read" }
+    : x === "download" ? { label: "Download the podcast (MP3)", goal: "Download the podcast audio", mode: "download" }
     : x === "podcast" ? { label: "Make it a podcast", goal: sel ? "Make a podcast of the selected text" : "Make a podcast of this page", mode: "podcast" }
     : { label: sel ? x.replace("this page", "the selection") : x, goal: sel ? x.replace("this page", "the selected text") : x };
   const list = SUGGEST[r.kind] || SUGGEST.default;
@@ -926,6 +1057,7 @@ const convo = new Conversation({
 });
 chrome.commands.onCommand.addListener((cmd) => {
   if (cmd === "toggle-conversation") (convo.active ? convo.end(true) : convo.start()).catch(() => {});
+  if (cmd === "pause-speaking") (voice.state.paused ? voice.resumeSpeaking() : voice.pauseSpeaking()).catch(() => {});
 });
 
 // ---------- text model (LiveKit Inference) ----------
@@ -1023,11 +1155,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
 chrome.tabs.onRemoved.addListener((tabId) => forgetTab(tabId));
 
 // ---------- helpers ----------
-async function injectMain(tabId, func, args) {
-  const [res] = await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func, args });
-  return res?.result;
-}
-
 async function inject(tabId, func, args) {
   const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
   return res?.result;

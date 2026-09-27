@@ -12,7 +12,8 @@
 import { buildOutline, extractRange } from "./outline.js";
 import { focusedItem, readItem } from "./items.js";
 import { chat } from "./lk.js";
-import { systemOne, choice } from "./jev.js";
+import { choice } from "./jev.js";
+import { decide, deciderReady, isLaya } from "./decider.js";
 
 const LOCATE_PROMPT = `You locate content on a web page for a browser assistant.
 You get the page outline: one line per text block, in reading order, as
@@ -69,14 +70,14 @@ export async function pickTarget(ctx, purpose) {
       log("warn", `Couldn't locate it with the text model: ${e.message}`);
     }
   }
-  if (!range && ctx.settings?.apiKey) range = await rangeWithJev(ctx, outline);
+  if (!range && deciderReady(ctx.settings)) range = await rangeWithJev(ctx, outline);
   if (range === "page") return { kind: "page" };
   if (!range) return DEICTIC.test(ctx.goal) ? fallbackFocused(ctx) : { kind: "page" };
 
   const got = await inject(extractRange, [range.start, range.end]);
   if (!got?.text) return { kind: "page" };
   if (got.expanded) log("info", `Expanded "see more" (${got.expanded}).`);
-  return { kind: "item", text: got.text, first: range.label || got.first, label: range.label };
+  return { kind: "item", text: got.text, first: range.label || got.first, label: range.label, start: range.start, end: range.end };
 }
 
 // Jev only: pick the starting line (a heading/author line) with a Choice; the range
@@ -87,12 +88,12 @@ async function rangeWithJev(ctx, outline) {
     .map((l, i) => ({ ...l, i }))
     .filter((l) => !l.ui && (l.heading || l.link) && l.len >= 2 && l.len <= 140)
     .sort((a, b) => (a.pos === "screen" ? 0 : 1) - (b.pos === "screen" ? 0 : 1))
-    .slice(0, 200)
+    .slice(0, isLaya(ctx.settings) ? 40 : 200)
     .sort((a, b) => a.i - b.i);
   if (!cands.length) return null;
   const s = ctx.settings;
-  const res = await systemOne({
-    apiBase: s.apiBase, apiKey: s.apiKey, model: s.model, signal: ctx.signal,
+  const res = await decide(s, {
+    signal: ctx.signal,
     state: { request: ctx.goal, page: { url: outline.url, title: outline.title }, note: "Lines marked 'on screen' are what the user is looking at now." },
     questions: {
       start: choice("Which line is the title, heading or author line where the part of the page that `request` is about begins?", {

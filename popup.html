@@ -15,17 +15,53 @@
   </header>
 
   <section id="settings" hidden>
-    <h2>Jev (TypeSafe)</h2>
-    <label>TypeSafe API key
-      <input id="apiKey" type="password" placeholder="ts-…" autocomplete="off" />
+    <h2>Decision model</h2>
+    <label>Who makes the decisions
+      <select id="decider">
+        <option value="jev">Jev (TypeSafe API, needs a key)</option>
+        <option value="laya">Laya (runs in your browser, no key)</option>
+        <option value="laya-typed">Laya, typed-decisions checkpoint (runs in your browser)</option>
+      </select>
     </label>
-    <div class="row">
-      <label>Model <input id="model" type="text" /></label>
-      <label>Max steps <input id="maxSteps" type="number" min="1" max="100" /></label>
+    <div id="jevFields">
+      <label>TypeSafe API key
+        <input id="apiKey" type="password" placeholder="ts-…" autocomplete="off" />
+      </label>
+      <div class="row">
+        <label>Model <input id="model" type="text" /></label>
+        <label>API base <input id="apiBase" type="text" /></label>
+      </div>
+    </div>
+    <div id="layaFields" hidden>
+      <p class="help">Laya runs on this computer: no key, and page text never leaves the browser. It downloads once (cached afterwards) and is slower and less accurate than Jev, so tasks take longer. The text model below helps it understand requests.</p>
+      <div class="row">
+        <label>Build
+          <select id="layaBuild">
+            <option value="q4e8">int4 · 290 MB · can use the GPU</option>
+            <option value="q8e8">int8 · 440 MB · CPU only, more faithful</option>
+          </select>
+        </label>
+        <label>Run on
+          <select id="layaDevice">
+            <option value="auto">Automatic</option>
+            <option value="webgpu">GPU (WebGPU)</option>
+            <option value="wasm">CPU</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" id="layaLoadBtn" class="secondary small">Download &amp; load now</button>
+        <button type="button" id="layaClearBtn" class="secondary small" title="Delete the downloaded model from this browser">Delete download</button>
+      </div>
+      <p id="layaStatus" class="help"></p>
+      <details>
+        <summary>Advanced</summary>
+        <label>Model folder URL <input id="layaModelBase" type="text" placeholder="default: layaForWeb builds on Hugging Face" /></label>
+      </details>
     </div>
     <div class="row">
+      <label>Max steps <input id="maxSteps" type="number" min="1" max="100" /></label>
       <label>Min confidence <input id="minConfidence" type="number" min="0" max="1" step="0.05" /></label>
-      <label>API base <input id="apiBase" type="text" /></label>
     </div>
     <label class="check"><input id="confirmRisky" type="checkbox" /> Ask me before risky actions (orders, deletes, sending)</label>
     <label>Toolbar icon opens
@@ -100,6 +136,7 @@
   <div id="voiceBar" class="voice-bar" hidden>
     <span id="voiceDot" class="voice-dot"></span>
     <span id="voiceText">Speaking…</span>
+    <button type="button" id="voicePause" class="secondary small" title="Pause (Alt+Shift+P)" hidden>⏸ Pause</button>
     <button type="button" id="voiceStop" class="secondary small">■ Stop</button>
   </div>
 
@@ -128,8 +165,9 @@
       <button type="button" id="undoBtn" class="secondary small">Undo</button>
       <button type="button" id="saveRuleBtn" class="small">Save as rule for this site</button>
     </div>
-    <div id="skillActions" class="row" hidden>
-      <button type="button" id="skillUndoBtn" class="secondary small">Remove what Jev added</button>
+    <div id="podActions" class="row" hidden>
+      <button type="button" id="podDlBtn" class="small" title="Save the podcast as an MP3 to listen to later">⬇ Download MP3</button>
+      <span id="podDlText" class="help"></span>
     </div>
   </div>
 

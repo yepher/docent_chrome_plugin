@@ -26,6 +26,7 @@ function ttsStop(reason = "stopped") {
   if (!tts) return;
   const t = tts;
   tts = null;
+  if (t.capture && !captures.get(t.capture)?.complete) captures.delete(t.capture);
   const played = t.next > 0 ? Math.min(1, Math.max(0, (t.ctx.currentTime - (t.startAt || 0)) / Math.max(0.01, t.next - (t.startAt || 0)))) : 0;
   lastSpoken = { words: t.words, until: Date.now() + 1500 };
   try { t.ws.close(); } catch (_) {}
@@ -48,12 +49,27 @@ function isEcho(text) {
   const hit = w.filter((x) => ref.has(x)).length;
   return hit / w.length >= 0.7;
 }
-const ttsPlaying = () => !!(tts && tts.ctx.currentTime < tts.next);
+const ttsPlaying = () => !!(tts && !tts.paused && tts.ctx.currentTime < tts.next);
 
-function ttsStart({ url, create, sampleRate, sid }) {
+// Pause / resume: suspending the AudioContext freezes its clock, so scheduled audio, the
+// read-along sentence timer and the "finished" check all hold exactly where they are.
+async function ttsPause() {
+  if (!tts || tts.paused) return;
+  tts.paused = true;
+  await tts.ctx.suspend().catch(() => {});
+  emit("tts-paused");
+}
+async function ttsResume() {
+  if (!tts || !tts.paused) return;
+  tts.paused = false;
+  await tts.ctx.resume().catch(() => {});
+  emit("tts-resumed");
+}
+
+function ttsStart({ url, create, sampleRate, sid, capture }) {
   ttsStop("replaced");
   const ctx = new AudioContext({ sampleRate });
-  const t = { sid, ws: new WebSocket(url), ctx, next: 0, queue: [], sources: [], gotDone: false, bytes: 0, flushed: false, words: new Set(), segs: [], chars: 0, seg: -1 };
+  const t = { sid, capture, ws: new WebSocket(url), ctx, next: 0, queue: [], sources: [], gotDone: false, bytes: 0, flushed: false, words: new Set(), segs: [], chars: 0, seg: -1 };
   // Read-along: which sentence is playing now. Sentence start times are estimated in
   // proportion to their length over the audio produced (exact total once "done").
   t.segTimer = setInterval(() => {
@@ -71,6 +87,7 @@ function ttsStart({ url, create, sampleRate, sid }) {
     if (cur !== t.seg) { t.seg = cur; emit("tts-seg", { idx: cur }); }
   }, 120);
   tts = t;
+  if (capture) startCapture(capture);
   const send = (obj) => (t.ws.readyState === 1 ? t.ws.send(JSON.stringify(obj)) : t.queue.push(obj));
   t.send = send;
   t.ws.onopen = () => {
@@ -85,6 +102,7 @@ function ttsStart({ url, create, sampleRate, sid }) {
     if (data.type === "output_audio" && data.audio) {
       const pcm = b64ToInt16(data.audio);
       t.bytes += pcm.length * 2;
+      if (t.capture) captures.get(t.capture)?.chunks.push(pcm);
       const buf = ctx.createBuffer(1, pcm.length, sampleRate);
       const ch = buf.getChannelData(0);
       for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
@@ -99,6 +117,7 @@ function ttsStart({ url, create, sampleRate, sid }) {
       if (t.sources.length > 400) t.sources.splice(0, 200);
     } else if (data.type === "done") {
       t.gotDone = true;
+      if (t.capture && captures.has(t.capture)) captures.get(t.capture).complete = true;
       // Wait for the scheduled audio to finish playing.
       t.doneTimer = setInterval(() => {
         if (tts === t && ctx.currentTime >= t.next - 0.02) {
@@ -112,7 +131,8 @@ function ttsStart({ url, create, sampleRate, sid }) {
     }
   };
   t.ws.onerror = () => { if (tts === t) { emit("tts-error", { message: "Couldn't connect to LiveKit Inference TTS (check the API key/secret and that Inference is enabled)." }); ttsStop("error"); } };
-  t.ws.onclose = (ev) => { if (tts === t && !t.gotDone) { emit("tts-error", { message: `TTS connection closed (${ev.code}${ev.reason ? ": " + ev.reason : ""}).` }); ttsStop("error"); } };
+  t.ws.onclose = (ev) => { if (tts === t && !t.gotDone && t.paused && t.flushed) { t.gotDone = true; t.doneTimer = setInterval(() => { if (tts === t && !t.paused && ctx.currentTime >= t.next - 0.02) ttsStop("finished"); }, 150); return; }
+  if (tts === t && !t.gotDone) { emit("tts-error", { message: `TTS connection closed (${ev.code}${ev.reason ? ": " + ev.reason : ""}).` }); ttsStop("error"); } };
 }
 
 // ---------- STT ----------
@@ -216,8 +236,121 @@ async function sttStop(silent) {
   if (!silent) emit("stt-stopped", { text: s.finals.join(" ").trim() });
 }
 
+// ---------- podcast audio: keep what was played, render the rest, export an MP3 ----------
+// Each podcast turn's audio is kept as it arrives (key "podcastId:turn"), so exporting
+// only has to synthesize the turns you haven't heard yet.
+const captures = new Map();
+let capturePod = null;
+function startCapture(key) {
+  const pod = key.split(":")[0];
+  if (capturePod !== pod) { captures.clear(); capturePod = pod; }
+  captures.set(key, { chunks: [], complete: false });
+}
+
+// Synthesize one turn without playing it: collect the audio until "done".
+function renderTurn({ url, create, text, gen }) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const chunks = [];
+    let done = false;
+    const timer = setTimeout(() => { try { ws.close(); } catch (_) {} reject(new Error("TTS timed out")); }, 90_000);
+    ws.onopen = () => {
+      ws.send(JSON.stringify(create));
+      ws.send(JSON.stringify({ type: "input_transcript", transcript: text + " ", generation_config: gen || {}, extra: {} }));
+      ws.send(JSON.stringify({ type: "session.flush" }));
+    };
+    ws.onmessage = (ev) => {
+      let d;
+      try { d = JSON.parse(ev.data); } catch (_) { return; }
+      if (d.type === "output_audio" && d.audio) chunks.push(b64ToInt16(d.audio));
+      else if (d.type === "done") { done = true; clearTimeout(timer); try { ws.close(); } catch (_) {} resolve(chunks); }
+      else if (d.type === "error") { clearTimeout(timer); try { ws.close(); } catch (_) {} reject(new Error(d.message || "TTS error")); }
+    };
+    ws.onerror = () => { if (!done) { clearTimeout(timer); reject(new Error("Couldn't connect to LiveKit Inference TTS.")); } };
+    ws.onclose = () => { if (!done) { clearTimeout(timer); reject(new Error("TTS connection closed early.")); } };
+  });
+}
+
+async function podExport({ pod, turns, sampleRate, gapMs = 350 }) {
+  const parts = [];
+  const gap = new Int16Array(Math.round((sampleRate * gapMs) / 1000));
+  let rendered = 0;
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
+    const got = captures.get(`${pod}:${t.idx}`);
+    let chunks = got?.complete ? got.chunks : null;
+    for (let attempt = 0; !chunks && attempt < 3; attempt++) {
+      try { chunks = await renderTurn(t); rendered++; } catch (e) { if (attempt === 2) throw e; await new Promise((r) => setTimeout(r, 800)); }
+    }
+    parts.push(...chunks, gap);
+    emit("pod-export-progress", { done: i + 1, total: turns.length });
+  }
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const pcm = new Int16Array(total);
+  let o = 0;
+  for (const p of parts) { pcm.set(p, o); o += p.length; }
+  let blob, ext;
+  try {
+    const { Mp3Encoder } = await import("./vendor/lamejs.mjs");
+    const enc = new Mp3Encoder(1, sampleRate, 64);
+    const out = [];
+    for (let i = 0; i < pcm.length; i += 1152 * 20) {
+      const b = enc.encodeBuffer(pcm.subarray(i, i + 1152 * 20));
+      if (b.length) out.push(new Uint8Array(b));
+      if (i % (1152 * 400) === 0) await new Promise((r) => setTimeout(r, 0)); // stay responsive
+    }
+    const end = enc.flush();
+    if (end.length) out.push(new Uint8Array(end));
+    blob = new Blob(out, { type: "audio/mpeg" }); ext = "mp3";
+  } catch (e) {
+    blob = wavBlob(pcm, sampleRate); ext = "wav"; // encoder unavailable: plain WAV
+  }
+  const url = URL.createObjectURL(blob);
+  setTimeout(() => URL.revokeObjectURL(url), 10 * 60_000);
+  return { url, ext, bytes: blob.size, seconds: Math.round(pcm.length / sampleRate), rendered };
+}
+
+function wavBlob(pcm, rate) {
+  const h = new DataView(new ArrayBuffer(44));
+  const str = (o, s) => [...s].forEach((c, i) => h.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF"); h.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  h.setUint32(16, 16, true); h.setUint16(20, 1, true); h.setUint16(22, 1, true); h.setUint32(24, rate, true);
+  h.setUint32(28, rate * 2, true); h.setUint16(32, 2, true); h.setUint16(34, 16, true); str(36, "data"); h.setUint32(40, pcm.length * 2, true);
+  return new Blob([h.buffer, pcm.buffer], { type: "audio/wav" });
+}
+
+// ---------- Laya: the in-browser decision model runs in a worker (laya-worker.js) ----------
+let layaWorker = null, layaSeq = 0;
+const layaPending = new Map();
+function layaCall(msg) {
+  if (!layaWorker) {
+    layaWorker = new Worker("laya-worker.js", { type: "module" });
+    layaWorker.onmessage = (ev) => {
+      const m = ev.data || {};
+      if (m.type === "progress") chrome.runtime.sendMessage({ type: "laya:progress", text: m.text, frac: m.frac }).catch(() => {});
+      else if (m.type === "result") { const p = layaPending.get(m.id); layaPending.delete(m.id); p?.(m); }
+    };
+    layaWorker.onerror = (e) => {
+      for (const p of layaPending.values()) p({ error: `The Laya worker failed${e.message ? `: ${e.message}` : ""}.` });
+      layaPending.clear();
+      layaWorker = null;
+    };
+  }
+  const id = ++layaSeq;
+  return new Promise((resolve) => { layaPending.set(id, resolve); layaWorker.postMessage({ ...msg, id }); });
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== "offscreen") return;
+  if (typeof msg.type === "string" && msg.type.startsWith("laya:")) {
+    const { target, type, ...rest } = msg;
+    layaCall({ ...rest, type: type.slice(5) }).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "pod:export") {
+    podExport(msg).then(sendResponse, (e) => sendResponse({ error: e.message || String(e) }));
+    return true;
+  }
   switch (msg.type) {
     case "tts:start": ttsStart(msg); break;
     case "tts:append":
@@ -229,6 +362,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
     case "tts:end": if (tts && !tts.flushed) { tts.flushed = true; tts.send({ type: "session.flush" }); } break;
     case "tts:stop": ttsStop("stopped"); break;
+    case "tts:pause": ttsPause(); break;
+    case "tts:resume": ttsResume(); break;
     case "stt:start": sttStart(msg); break;
     case "stt:stop": sttStop(false); break;
   }

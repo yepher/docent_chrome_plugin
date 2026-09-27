@@ -4,6 +4,7 @@ import { SUGGESTED_VOICES, STT_MODELS, DEFAULT_VOICE, DEFAULT_STT } from "./voic
 const $ = (id) => document.getElementById(id);
 const DEFAULTS = {
   apiKey: "", model: "jev-latest", apiBase: "https://api.typesafe.ai", maxSteps: 15, minConfidence: 0.3, confirmRisky: true,
+  decider: "jev", layaBuild: "q4e8", layaDevice: "auto", layaModelBase: "",
   lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
   iconOpens: "popup",
   ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "",
@@ -29,7 +30,8 @@ async function loadSettings() {
   fillModels(lkModelList?.length ? lkModelList : KNOWN_MODELS, s.lkModel || DEFAULT_MODEL);
   // First time with LiveKit set up: fetch the real model list in the background.
   if (!lkModelList?.length && lkConfigured(s)) $("lkRefresh").click();
-  if (!s.apiKey) $("settings").hidden = false;
+  showDecider();
+  if (!s.apiKey && !String(s.decider).startsWith("laya")) $("settings").hidden = false;
   return s;
 }
 
@@ -144,6 +146,38 @@ $("lkTest").onclick = async () => {
   }
 };
 
+// ---------- decision model: Jev or Laya ----------
+function showDecider() {
+  const laya = $("decider").value.startsWith("laya");
+  $("jevFields").hidden = laya;
+  $("layaFields").hidden = !laya;
+  if (laya) refreshLaya();
+}
+$("decider").onchange = showDecider;
+function layaText(text, cls = "") { $("layaStatus").textContent = text; $("layaStatus").className = "help " + cls; }
+function describeLaya(info) {
+  return `Loaded: ${info.checkpoint === "laya" ? "general" : "typed decisions"}, ${info.build === "q4e8" ? "int4" : "int8"}, ${info.device === "webgpu" ? "GPU (WebGPU)" : `CPU, ${info.threads} thread${info.threads === 1 ? "" : "s"}`}.`;
+}
+async function refreshLaya() {
+  const st = await send({ type: "laya:status" }).catch(() => null);
+  if (st?.info) layaText(describeLaya(st.info), "ok");
+  else if (!st?.loading) layaText("Not loaded yet. It loads automatically the first time Laya is needed, or press Download & load now.");
+}
+$("layaLoadBtn").onclick = async () => {
+  $("layaLoadBtn").disabled = true;
+  layaText("Starting…");
+  const r = await send({ type: "laya:load", settings: readForm() });
+  $("layaLoadBtn").disabled = false;
+  if (r?.error) layaText(r.error, "err"); else layaText(describeLaya(r.info), "ok");
+};
+$("layaClearBtn").onclick = async () => {
+  const r = await send({ type: "laya:clear" });
+  layaText(r?.error ? r.error : `Deleted the downloaded model (${r?.cleared || 0} cache${r?.cleared === 1 ? "" : "s"}).`, r?.error ? "err" : "");
+};
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "laya:progress" && !$("layaFields").hidden) layaText(msg.text);
+});
+
 $("settingsBtn").onclick = () => ($("settings").hidden = !$("settings").hidden);
 $("saveSettings").onclick = async () => {
   const s = readForm();
@@ -187,13 +221,6 @@ function step(dir) {
   focusItem(items[navIndex]);
   [...$("answerItems").children].forEach((li, i) => (li.style.fontWeight = i === navIndex ? "600" : ""));
 }
-$("skillUndoBtn").onclick = async () => {
-  $("skillUndoBtn").disabled = true;
-  const r = await send({ type: "jev:undoSkill" });
-  $("skillUndoBtn").textContent = `Removed ${r?.removed ?? 0}`;
-};
-$("prevBtn").onclick = () => step(-1);
-$("nextBtn").onclick = () => step(1);
 $("undoBtn").onclick = async () => {
   const f = lastRun?.answer?.filter;
   if (!f) return;
@@ -284,7 +311,17 @@ function voiceBar(mode, text) {
   bar.hidden = !mode;
   bar.className = "voice-bar " + (mode || "");
   if (text) $("voiceText").textContent = text;
+  // Pause / resume is offered whenever Jev is speaking (or paused).
+  const canPause = mode === "speaking" || mode === "paused";
+  $("voicePause").hidden = !canPause;
+  $("voicePause").textContent = mode === "paused" ? "▶ Resume" : "⏸ Pause";
+  $("voicePause").title = (mode === "paused" ? "Resume" : "Pause") + " (Alt+Shift+P)";
 }
+$("voicePause").onclick = async () => {
+  const st = await send({ type: "voice:togglePause" });
+  if (st?.paused) voiceBar("paused", "Paused");
+  else if (st?.speaking) voiceBar("speaking", conv.active ? PHASE_TEXT.speaking : "Speaking…");
+};
 $("readBtn").onclick = async () => {
   const tab = await activeTab();
   if (!tab) return;
@@ -300,6 +337,11 @@ $("podBtn").onclick = async () => {
   const res = await send({ type: "jev:start", goal: selection ? "Make a podcast of the selected text" : "Make a podcast of this page", tabId: tab.id, selection, podcast: true });
   setPending(null);
   if (res?.error) voiceBar("error", res.error); else render(res.run);
+};
+$("podDlBtn").onclick = async () => {
+  $("podDlBtn").disabled = true;
+  const r = await send({ type: "jev:podcastDownload" });
+  if (r?.error) { $("podDlText").textContent = r.error; $("podDlBtn").disabled = false; }
 };
 $("speakBtn").onclick = async () => {
   const a = lastRun?.answer;
@@ -343,6 +385,8 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (conv.active) return onConvVoiceEvent(msg); // hands-free mode has its own display
   switch (msg.kind) {
     case "tts-started": voiceBar("speaking", "Speaking…"); break;
+    case "tts-paused": voiceBar("paused", "Paused"); break;
+    case "tts-resumed": voiceBar("speaking", "Speaking…"); break;
     case "tts-done": if (!listening) voiceBar(null); break;
     case "tts-error": voiceBar("error", msg.message); break;
     case "stt-interim":
@@ -370,7 +414,7 @@ chrome.runtime.onMessage.addListener((msg) => {
       break;
   }
 });
-send({ type: "voice:state" }).then((st) => { if (st?.speaking && !conv.active) voiceBar("speaking", "Speaking…"); });
+send({ type: "voice:state" }).then((st) => { if (st?.speaking && !conv.active) voiceBar(st.paused ? "paused" : "speaking", st.paused ? "Paused" : "Speaking…"); });
 
 // ---------- hands-free conversation ----------
 let conv = { active: false, phase: "off", history: [] };
@@ -404,6 +448,8 @@ function onConvVoiceEvent(msg) {
     $("prompt").value = msg.text;
   } else if (msg.kind === "mic-level") {
     $("voiceDot").style.transform = `scale(${1 + Math.min(1.5, msg.level * 4)})`;
+  } else if (msg.kind === "tts-paused" || msg.kind === "tts-resumed") {
+    voiceBar(msg.kind === "tts-paused" ? "paused" : "speaking", msg.kind === "tts-paused" ? "Paused. Say \u201ccontinue\u201d to resume." : PHASE_TEXT.speaking);
   } else if (msg.kind === "tts-error" || msg.kind === "stt-error") {
     voiceBar("error", msg.message);
   } else if (msg.kind === "mic-denied") {
@@ -469,9 +515,13 @@ function render(run) {
       }
       return li;
     }));
-    $("skillActions").hidden = !ans.undo;
-    $("skillUndoBtn").disabled = false;
-    $("skillUndoBtn").textContent = "Remove what Jev added";
+    // Podcast: download the audio once the script is written.
+    $("podActions").hidden = !ans.podcast || !ans.downloadable;
+    const dl = ans.dl;
+    $("podDlBtn").disabled = dl?.state === "rendering";
+    $("podDlBtn").textContent = dl?.state === "rendering" ? `Preparing audio… ${dl.done}/${dl.total}` : dl?.state === "saved" ? "⬇ Download again" : "⬇ Download MP3";
+    $("podDlText").textContent = dl?.state === "saved" ? `${dl.text} · in Downloads/Jev podcasts` : dl?.state === "error" ? dl.text : "";
+    $("podDlText").className = "help" + (dl?.state === "error" ? " err" : "");
     const f = ans.filter;
     $("answerActions").hidden = !f;
     if (f) {

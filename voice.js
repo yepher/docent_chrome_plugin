@@ -32,14 +32,14 @@ const splitModel = (s) => {
 const wsBase = (s) => gatewayUrl(s).replace(/^http/, "ws");
 const toOffscreen = (msg) => chrome.runtime.sendMessage({ target: "offscreen", ...msg }).catch(() => {});
 
-async function ensureOffscreen() {
+export async function ensureOffscreen() {
   const has = chrome.offscreen.hasDocument ? await chrome.offscreen.hasDocument() : false;
   if (has) return;
   try {
     await chrome.offscreen.createDocument({
       url: "offscreen.html",
-      reasons: ["AUDIO_PLAYBACK", "USER_MEDIA"],
-      justification: "Play LiveKit Inference text-to-speech and capture the microphone for voice questions.",
+      reasons: ["AUDIO_PLAYBACK", "USER_MEDIA", "WORKERS"],
+      justification: "Play LiveKit Inference text-to-speech, capture the microphone for voice questions, and run the in-browser Laya decision model in a worker.",
     });
   } catch (e) {
     if (!/single offscreen|already/i.test(e.message)) throw e;
@@ -91,7 +91,7 @@ export function sentences(text, max = 400) {
   return out;
 }
 
-export const state = { speaking: false, listening: false };
+export const state = { speaking: false, listening: false, paused: false };
 
 // Start a TTS session; push text as it arrives (e.g. while the LLM streams), then end().
 export async function speakStream(s, opts = {}) {
@@ -105,6 +105,7 @@ export async function speakStream(s, opts = {}) {
     sampleRate: TTS_RATE,
     create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voice ? { voice } : {}), extra: {} },
     ...(opts.sid ? { sid: opts.sid } : {}),
+    ...(opts.capture ? { capture: opts.capture } : {}),
   });
   state.speaking = true;
   let buffer = "";
@@ -152,8 +153,33 @@ export async function speak(s, text, opts = {}) {
   st.end();
 }
 
+// Everything needed to open a TTS session for one voice (used to render podcast audio).
+export async function ttsSpec(s, voiceId) {
+  await ensureOffscreen();
+  await setAuth(s);
+  const [model, v] = splitModel(voiceId || s.ttsVoice || DEFAULT_VOICE);
+  return {
+    url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
+    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(v ? { voice: v } : {}), extra: {} },
+    gen: { model, ...(v ? { voice: v } : {}) },
+    sampleRate: TTS_RATE,
+  };
+}
+
+// Pause / resume whatever is being spoken (page reading, podcast, answers).
+export function pauseSpeaking() {
+  if (!state.speaking) return Promise.resolve();
+  state.paused = true;
+  return toOffscreen({ type: "tts:pause" });
+}
+export function resumeSpeaking() {
+  state.paused = false;
+  return toOffscreen({ type: "tts:resume" });
+}
+
 export function stopSpeaking() {
   state.speaking = false;
+  state.paused = false;
   return toOffscreen({ type: "tts:stop" });
 }
 

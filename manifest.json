@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jev Browser Agent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Type or say a prompt and let TypeSafe Jev act on the current tab, answer questions about it, and read it aloud.",
   "action": {
     "default_title": "Jev",
@@ -31,7 +31,9 @@
     "sidePanel",
     "contextMenus",
     "offscreen",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "downloads",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -48,9 +50,24 @@
         "default": "Alt+Shift+J"
       },
       "description": "Start or stop a hands-free conversation with Jev"
+    },
+    "pause-speaking": {
+      "suggested_key": {
+        "default": "Alt+Shift+P"
+      },
+      "description": "Pause or resume what Jev is saying"
     }
   },
   "side_panel": {
     "default_path": "popup.html?panel=1"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
   }
 }

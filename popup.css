@@ -111,3 +111,7 @@ html.panel .conv-box { max-height: 40vh; }
 button.chip { background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 12px; white-space: normal; text-align: left; }
 button.chip:hover { border-color: var(--accent); color: var(--accent); }
 button.chip.ai::before { content: "✦ "; color: var(--accent); }
+.voice-bar.paused .voice-dot { animation: none; opacity: .5; }
+#podDlText.err { color: var(--err); }
+#podActions { margin-top: 6px; }
+#layaStatus.ok { color: var(--ok); } #layaStatus.err { color: var(--err); }

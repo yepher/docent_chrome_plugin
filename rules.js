@@ -2,11 +2,13 @@
 // load and scroll. Items come from items.js; each gets one Jev Noul ("does this
 // item match the request?"), answered in batches, cached by item text.
 
-import { systemOne, noul } from "./jev.js";
+import { noul } from "./jev.js";
+import { decide, deciderReady, isLaya, layaJudge } from "./decider.js";
 import { segmentItems, markItems, clearMarks, watchMutations } from "./items.js";
 
 const BATCH = 120;
 const MAX_ITEMS = 400;
+const LAYA_ITEMS = 80; // Laya runs on this computer: check fewer items per pass
 const caches = new Map(); // request text -> Map(item text -> probability)
 
 export function modeFor(kind, prompt) {
@@ -27,6 +29,11 @@ export async function judgeItems(s, request, items, page, signal) {
   const todo = [...new Set(items.map((x) => x.text).filter((t) => !cache.has(t)))];
   const batches = [];
   for (let i = 0; i < todo.length; i += BATCH) batches.push(todo.slice(i, i + BATCH));
+  if (isLaya(s)) {
+    const ps = await layaJudge(s, todo, request, signal);
+    todo.forEach((t, i) => cache.set(t, ps[i]));
+    batches.length = 0;
+  }
   await Promise.all(batches.map(async (batch) => {
     const questions = {};
     batch.forEach((_, i) => {
@@ -35,8 +42,8 @@ export async function judgeItems(s, request, items, page, signal) {
         false: "The item is something else",
       });
     });
-    const res = await systemOne({
-      apiBase: s.apiBase, apiKey: s.apiKey, model: s.model, signal,
+    const res = await decide(s, {
+      signal,
       state: { request, page: { url: page.url, title: page.title }, items: batch },
       questions,
     });
@@ -48,7 +55,7 @@ export async function judgeItems(s, request, items, page, signal) {
 
 // One-off find/hide/dim for a prompt. Returns matches and borderline items.
 export async function runFilter(s, tabId, request, mode, signal) {
-  const seg = await inject(tabId, segmentItems, [false, MAX_ITEMS]);
+  const seg = await inject(tabId, segmentItems, [false, isLaya(s) ? LAYA_ITEMS : MAX_ITEMS]);
   if (!seg?.items?.length) return { total: 0, matches: [], borderline: [], host: seg?.host };
   const ps = await judgeItems(s, request, seg.items, seg, signal);
   const matches = [], borderline = [];
@@ -104,11 +111,11 @@ async function applyRulesNow(s, tabId, onlyNew) {
   if (!tab || !/^https?:/.test(tab.url || "")) return 0;
   const host = hostOf(tab.url);
   const rules = (await getRules()).filter((r) => r.enabled && r.host === host);
-  if (!rules.length || !s.apiKey) {
+  if (!rules.length || !deciderReady(s)) {
     if (!onlyNew) setCount(tabId, 0);
     return 0;
   }
-  const seg = await inject(tabId, segmentItems, [onlyNew, MAX_ITEMS]).catch(() => null);
+  const seg = await inject(tabId, segmentItems, [onlyNew, isLaya(s) ? LAYA_ITEMS : MAX_ITEMS]).catch(() => null);
   await inject(tabId, watchMutations).catch(() => {});
   if (!seg?.items?.length) return counts.get(tabId) || 0;
 

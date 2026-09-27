@@ -50,10 +50,11 @@ export class Podcast {
     this.waiting = null;  // resolves when the current turn's audio ends
     this.more = null;     // resolves when a new turn is written
     this.playing = false;
+    this.id = String(Date.now());
   }
 
   // Write the script with the text model, streaming turns into the queue.
-  async write({ title, url, text, goal, signal }) {
+  async write({ title, url, text, goal, signal, cited }) {
     const [a, b] = this.d.hosts;
     const words = targetWords(goal);
     const model = this.d.settings.lkModel || DEFAULT_MODEL;
@@ -74,6 +75,11 @@ export class Podcast {
         `About ${words} words in total. Each turn is 1 to 3 short sentences of natural spoken English.`,
         `No stage directions, sound effects, music cues, markdown or emojis. Don't say "welcome to the podcast" or name the show.`,
         `Format: one turn per line, exactly "${a.name}: …" or "${b.name}: …".`,
+        ...(cited ? [
+          `The source is split into numbered blocks: text blocks like [p12] and images, charts or videos like [m3] (with their alt text and caption).`,
+          `End every line with the ids of the blocks that line is about, in square brackets, e.g. "${b.name}: So sales doubled in a year? [p14, m2]". Use the ids exactly as given; never say them aloud.`,
+          `When the piece has a chart or image that matters, have a host point it out ("take a look at the chart here") and cite its [m] id, describing it only from its caption or alt text.`,
+        ] : []),
       ].join("\n") },
       { role: "user", content: `Title: ${title}\nURL: ${url}\n${goal ? `Listener's request: ${goal}\n` : ""}\nSource text:\n${text}` },
     ], {
@@ -92,7 +98,13 @@ export class Podcast {
     const line = raw.replace(/[*_#`]+/g, "").trim();
     if (!line) return;
     const [a, b] = this.d.hosts;
-    const m = /^([A-Za-z][\w .'-]{0,24}?)\s*:\s*(.+)$/.exec(line);
+    // Cited blocks: "… [p14, m2]" at the end of the line (and any stray [p3] inside it).
+    let refs = [];
+    const tail = /\s*\[((?:[pm]\d+)(?:\s*,\s*[pm]\d+)*)\]\s*$/i.exec(line);
+    let body = tail ? line.slice(0, tail.index) : line;
+    if (tail) refs = tail[1].split(/\s*,\s*/).map((x) => x.toLowerCase());
+    body = body.replace(/\s*\[(?:[pm]\d+)(?:\s*,\s*[pm]\d+)*\]/gi, (m0) => { refs.push(...m0.replace(/[\[\]\s]/g, "").toLowerCase().split(",")); return ""; }).trim();
+    const m = /^([A-Za-z][\w .'-]{0,24}?)\s*:\s*(.+)$/.exec(body);
     let host, text;
     if (m) {
       const who = m[1].trim().toLowerCase();
@@ -102,15 +114,17 @@ export class Podcast {
       text = m[2].trim();
     } else if (this.turns.length) {
       // A continuation line: same speaker.
-      this.turns[this.turns.length - 1].text += " " + line;
+      const last = this.turns[this.turns.length - 1];
+      last.text += " " + body;
+      last.refs.push(...refs);
       this.d.onUpdate?.(this);
       return;
     } else {
-      host = 0; text = line;
+      host = 0; text = body;
     }
     text = text.replace(/\[[^\]]*\]|\([^)]*(laugh|music|pause|sigh)[^)]*\)/gi, "").trim();
     if (!text) return;
-    this.turns.push({ host, text });
+    this.turns.push({ host, text, refs: [...new Set(refs)] });
     this.d.onUpdate?.(this);
     this.wake();
   }
@@ -132,9 +146,10 @@ export class Podcast {
         const t = this.turns[this.idx];
         const host = this.d.hosts[t.host];
         this.d.onUpdate?.(this);
+        this.d.onTurn?.(t);
         this.sid = `pod-${Date.now()}-${this.idx}`;
         const done = new Promise((r) => (this.waiting = r));
-        await voice.speak({ ...this.d.settings, ttsVoice: host.voice }, t.text, { sid: this.sid });
+        await voice.speak({ ...this.d.settings, ttsVoice: host.voice }, t.text, { sid: this.sid, capture: `${this.id}:${this.idx}` });
         const reason = await done;
         if (this.stopped) break;
         if (reason !== "finished") { this.paused = true; break; } // interrupted: "continue" resumes this turn
@@ -142,6 +157,7 @@ export class Podcast {
       }
     } finally {
       this.playing = false;
+      if (!this.paused) this.d.onEnd?.();
       this.d.onUpdate?.(this);
     }
   }
@@ -163,6 +179,18 @@ export class Podcast {
     const w = this.waiting;
     this.waiting = null;
     w?.("stopped");
+  }
+
+  // Render the whole show to one audio file (turns already played are reused).
+  async exportAudio(onProgress) {
+    const specs = {};
+    for (const h of this.d.hosts) specs[h.voice] = await voice.ttsSpec(this.d.settings, h.voice);
+    const turns = this.turns.map((t, idx) => {
+      const sp = specs[this.d.hosts[t.host].voice];
+      return { idx, url: sp.url, create: sp.create, gen: sp.gen, text: voice.forSpeech(t.text) };
+    });
+    const sampleRate = Object.values(specs)[0].sampleRate;
+    return chrome.runtime.sendMessage({ target: "offscreen", type: "pod:export", pod: this.id, turns, sampleRate });
   }
 
   get finished() { return this.scriptDone && this.idx >= this.turns.length; }
