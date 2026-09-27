@@ -6,7 +6,7 @@ const DEFAULTS = {
   apiKey: "", model: "jev-latest", apiBase: "https://api.typesafe.ai", maxSteps: 15, minConfidence: 0.3, confirmRisky: true,
   lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
   iconOpens: "popup",
-  ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false,
+  ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "",
 };
 const IN_PANEL = new URLSearchParams(location.search).has("panel");
 if (IN_PANEL) document.documentElement.classList.add("panel");
@@ -19,6 +19,7 @@ async function loadSettings() {
   const s = { ...DEFAULTS, ...(await chrome.storage.local.get(FIELDS)) };
   for (const k of FIELDS) {
     if (k === "lkModel" || k === "ttsVoice") continue; // filled by fillModels / fillVoices below
+    if (k === "podcastVoice2") fillVoice2(s[k]);
     const el = $(k);
     if (el.type === "checkbox") el.checked = !!s[k];
     else el.value = s[k];
@@ -91,6 +92,14 @@ function fillVoices(selected) {
   $("ttsVoiceCustom").hidden = true;
 }
 fillVoices(DEFAULT_VOICE);
+// Second podcast voice: automatic (a contrasting voice) or one of the suggested voices.
+function fillVoice2(selected = "") {
+  const opts = [new Option("Automatic (a contrasting voice)", ""), ...SUGGESTED_VOICES.map(([id, label]) => new Option(label, id))];
+  if (selected && !SUGGESTED_VOICES.some(([id]) => id === selected)) opts.push(new Option(selected, selected));
+  $("podcastVoice2").replaceChildren(...opts);
+  $("podcastVoice2").value = selected;
+}
+fillVoice2("");
 $("ttsVoice").onchange = () => {
   const custom = $("ttsVoice").value === CUSTOM;
   $("ttsVoiceCustom").hidden = !custom;
@@ -284,6 +293,14 @@ $("readBtn").onclick = async () => {
   setPending(null);
   if (res?.error) voiceBar("error", res.error); else render(res.run);
 };
+$("podBtn").onclick = async () => {
+  const tab = await activeTab();
+  if (!tab) return;
+  const selection = pending && pending.tabId === tab.id ? pending.selection : "";
+  const res = await send({ type: "jev:start", goal: selection ? "Make a podcast of the selected text" : "Make a podcast of this page", tabId: tab.id, selection, podcast: true });
+  setPending(null);
+  if (res?.error) voiceBar("error", res.error); else render(res.run);
+};
 $("speakBtn").onclick = async () => {
   const a = lastRun?.answer;
   if (!a) return;
@@ -292,6 +309,7 @@ $("speakBtn").onclick = async () => {
   if (r?.error) voiceBar("error", r.error);
 };
 $("voiceStop").onclick = async () => {
+  if (conv.active) { renderConv(await send({ type: "conv:end" })); return; }
   await send({ type: "voice:stopListening" });
   await send({ type: "voice:stop" });
   $("micBtn").classList.remove("listening");
@@ -322,12 +340,14 @@ $("micBtn").onclick = async () => {
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type !== "voice:event") return;
+  if (conv.active) return onConvVoiceEvent(msg); // hands-free mode has its own display
   switch (msg.kind) {
     case "tts-started": voiceBar("speaking", "Speaking…"); break;
     case "tts-done": if (!listening) voiceBar(null); break;
     case "tts-error": voiceBar("error", msg.message); break;
     case "stt-interim":
     case "stt-final":
+      if (!listening) break;
       heard = msg.text;
       $("prompt").value = heard;
       clearTimeout(silenceTimer);
@@ -350,7 +370,53 @@ chrome.runtime.onMessage.addListener((msg) => {
       break;
   }
 });
-send({ type: "voice:state" }).then((st) => { if (st?.speaking) voiceBar("speaking", "Speaking…"); });
+send({ type: "voice:state" }).then((st) => { if (st?.speaking && !conv.active) voiceBar("speaking", "Speaking…"); });
+
+// ---------- hands-free conversation ----------
+let conv = { active: false, phase: "off", history: [] };
+const PHASE_TEXT = {
+  listening: "Listening… just talk. Say \u201cstop listening\u201d to end.",
+  thinking: "Thinking…",
+  speaking: "Speaking… talk to interrupt.",
+};
+function renderConv(state) {
+  conv = state || conv;
+  $("talkBtn").classList.toggle("talking", conv.active);
+  $("talkBtn").title = conv.active ? "End the conversation" : "Start a hands-free conversation (Alt+Shift+J)";
+  $("micBtn").disabled = conv.active;
+  if (conv.active) voiceBar(conv.phase === "listening" ? "listening" : "speaking", PHASE_TEXT[conv.phase] || "");
+  else if ($("voiceBar").classList.contains("conv")) voiceBar(null);
+  $("voiceBar").classList.toggle("conv", conv.active);
+  $("convBox").hidden = !conv.history?.length;
+  $("convBox").replaceChildren(...(conv.history || []).slice(-8).map((h) => {
+    const li = document.createElement("li");
+    li.className = h.role;
+    li.textContent = h.text;
+    return li;
+  }));
+  $("convBox").scrollTop = $("convBox").scrollHeight;
+}
+function onConvVoiceEvent(msg) {
+  if (msg.kind === "stt-interim" || msg.kind === "stt-final") {
+    $("prompt").value = msg.text;
+    if (conv.phase === "listening") $("voiceText").textContent = `“${msg.text}”`;
+  } else if (msg.kind === "stt-utterance") {
+    $("prompt").value = msg.text;
+  } else if (msg.kind === "mic-level") {
+    $("voiceDot").style.transform = `scale(${1 + Math.min(1.5, msg.level * 4)})`;
+  } else if (msg.kind === "tts-error" || msg.kind === "stt-error") {
+    voiceBar("error", msg.message);
+  } else if (msg.kind === "mic-denied") {
+    voiceBar("error", "Allow the microphone in the tab that just opened, then start the conversation again.");
+  }
+}
+$("talkBtn").onclick = async () => {
+  const r = await send({ type: conv.active ? "conv:end" : "conv:start" });
+  if (r?.error) return voiceBar("error", r.error);
+  renderConv(r);
+};
+chrome.runtime.onMessage.addListener((msg) => { if (msg?.type === "conv:update") renderConv(msg.state); });
+send({ type: "conv:state" }).then((st) => renderConv(st));
 
 $("approveBtn").onclick = () => send({ type: "jev:confirm", approve: true });
 $("denyBtn").onclick = () => send({ type: "jev:confirm", approve: false });
@@ -382,7 +448,16 @@ function render(run) {
   $("answer").hidden = !ans;
   $("answer").classList.toggle("long", !!ans?.long);
   if (ans) {
-    $("answerText").textContent = ans.text;
+    $("answerLabel").textContent = ans.podcast ? "Podcast" : ans.reading ? "Reading" : "Answer";
+    const box = $("answerText");
+    const follow = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+    box.textContent = ans.text;
+    // Podcast transcript: keep the line being spoken in view.
+    if (ans.podcast) {
+      const at = ans.text.indexOf("▶ ");
+      if (at >= 0) box.scrollTop = Math.max(0, box.scrollHeight * (at / ans.text.length) - 40);
+      else if (follow) box.scrollTop = box.scrollHeight;
+    }
     $("answerNote").textContent = ans.note || "";
     $("answerItems").replaceChildren(...(ans.items || []).map((it, i) => {
       const li = document.createElement("li");
@@ -406,6 +481,25 @@ function render(run) {
       $("saveRuleBtn").textContent = `Save as rule for ${f.host}`;
     }
   }
+
+  // What next? Clickable follow-ups once a run is done.
+  const sugg = !busy && status === "done" ? run?.suggestions || [] : [];
+  $("suggest").hidden = !sugg.length;
+  $("suggestList").replaceChildren(...sugg.map((sg, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (sg.ai ? " ai" : "");
+    b.textContent = (sg.mode === "read" ? "🔊 " : sg.mode === "podcast" ? "🎧 " : "") + sg.label;
+    b.title = sg.goal;
+    b.onclick = async () => {
+      const tab = await activeTab();
+      if (!tab) return;
+      $("prompt").value = sg.goal;
+      const res = await send({ type: "jev:followup", index: i, tabId: tab.id });
+      if (res?.error) voiceBar("error", res.error); else render(res.run);
+    };
+    return b;
+  }));
 
   const ol = $("log");
   ol.replaceChildren(

@@ -94,7 +94,7 @@ export function sentences(text, max = 400) {
 export const state = { speaking: false, listening: false };
 
 // Start a TTS session; push text as it arrives (e.g. while the LLM streams), then end().
-export async function speakStream(s) {
+export async function speakStream(s, opts = {}) {
   await ensureOffscreen();
   await setAuth(s);
   const [model, voice] = splitModel(s.ttsVoice || DEFAULT_VOICE);
@@ -104,6 +104,7 @@ export async function speakStream(s) {
     url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
     sampleRate: TTS_RATE,
     create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voice ? { voice } : {}), extra: {} },
+    ...(opts.sid ? { sid: opts.sid } : {}),
   });
   state.speaking = true;
   let buffer = "";
@@ -123,8 +124,30 @@ export async function speakStream(s) {
   };
 }
 
-export async function speak(s, text) {
-  const st = await speakStream(s);
+// Speak a list of sentences, tagging each with its index so the offscreen player can
+// report which one is playing (read-along highlight, "continue from here").
+export async function speakSentences(s, list, offset = 0) {
+  await ensureOffscreen();
+  await setAuth(s);
+  const [model, voiceId] = splitModel(s.ttsVoice || DEFAULT_VOICE);
+  const gen = { model, ...(voiceId ? { voice: voiceId } : {}) };
+  await toOffscreen({
+    type: "tts:start",
+    url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
+    sampleRate: TTS_RATE,
+    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voiceId ? { voice: voiceId } : {}), extra: {} },
+  });
+  state.speaking = true;
+  list.forEach((raw, i) => {
+    const clean = forSpeech(raw);
+    if (clean) toOffscreen({ type: "tts:append", text: clean + " ", idx: offset + i, generation_config: gen });
+  });
+  await toOffscreen({ type: "tts:end" });
+}
+
+// opts.sid tags the session, so its "tts-done" event can be told apart from others.
+export async function speak(s, text, opts = {}) {
+  const st = await speakStream(s, opts);
   st.push(text);
   st.end();
 }
@@ -134,13 +157,15 @@ export function stopSpeaking() {
   return toOffscreen({ type: "tts:stop" });
 }
 
-export async function startListening(s) {
+export async function startListening(s, opts = {}) {
   await ensureOffscreen();
   await setAuth(s);
   const model = s.sttModel || DEFAULT_STT;
   state.listening = true;
   await toOffscreen({
     type: "stt:start",
+    continuous: !!opts.continuous,
+    endpointMs: opts.endpointMs || 900,
     url: `${wsBase(s)}/stt?model=${encodeURIComponent(model)}`,
     create: { type: "session.create", model, settings: { sample_rate: "16000", encoding: "pcm_s16le", language: "en", extra: {} } },
   });

@@ -65,9 +65,12 @@
       </div>
       <input id="ttsVoiceCustom" type="text" placeholder="provider/model:voice, e.g. cartesia/sonic-3:&lt;voice id&gt;" autocomplete="off" hidden />
     </label>
+    <label>Second podcast voice
+      <select id="podcastVoice2"></select>
+    </label>
     <label>Speech-to-text model <select id="sttModel"></select></label>
     <label class="check"><input id="speakAnswers" type="checkbox" /> Always speak answers aloud</label>
-    <p class="help">Answers are spoken automatically when you ask with the 🎤 or say "tell me" / "read it out". 🔊 reads the page (or your selection) aloud.</p>
+    <p class="help">Answers are spoken automatically when you ask with the 🎤 or say "tell me" / "read it out". 🔊 reads the page (or your selection) aloud. 🎧 turns it into a two-host podcast.</p>
 
     <div class="row end">
       <a href="https://console.typesafe.ai" target="_blank">Get a Jev key</a>
@@ -85,12 +88,15 @@
     <div class="row end">
       <span class="hint">⌘/Ctrl + Enter</span>
       <button type="button" id="readBtn" class="secondary icon-btn" title="Read this page aloud" aria-label="Read this page aloud">🔊</button>
+      <button type="button" id="podBtn" class="secondary icon-btn" title="Make a podcast of this page (two voices discuss it)" aria-label="Make a podcast of this page">🎧</button>
       <button type="button" id="micBtn" class="secondary icon-btn" title="Ask by voice" aria-label="Ask by voice">🎤</button>
+      <button type="button" id="talkBtn" class="secondary icon-btn" title="Start a hands-free conversation (Alt+Shift+J)" aria-label="Hands-free conversation">💬</button>
       <button type="button" id="stopBtn" class="secondary" hidden>Stop</button>
       <button type="submit" id="runBtn">Run</button>
     </div>
   </form>
 
+  <ol id="convBox" class="conv-box" hidden></ol>
   <div id="voiceBar" class="voice-bar" hidden>
     <span id="voiceDot" class="voice-dot"></span>
     <span id="voiceText">Speaking…</span>
@@ -107,7 +113,7 @@
 
   <div id="answer" class="answer-card" hidden>
     <div class="answer-head">
-      <span class="answer-label">Answer</span>
+      <span id="answerLabel" class="answer-label">Answer</span>
       <span>
         <button id="speakBtn" class="secondary small" title="Read the answer aloud">🔊</button>
         <button id="copyBtn" class="secondary small" title="Copy the answer">Copy</button>
@@ -125,6 +131,11 @@
     <div id="skillActions" class="row" hidden>
       <button type="button" id="skillUndoBtn" class="secondary small">Remove what Jev added</button>
     </div>
+  </div>
+
+  <div id="suggest" class="suggest" hidden>
+    <span class="suggest-label">Next</span>
+    <span id="suggestList" class="suggest-list"></span>
   </div>
 
   <ol id="log" class="log"></ol>

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jev Browser Agent",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "description": "Type or say a prompt and let TypeSafe Jev act on the current tab, answer questions about it, and read it aloud.",
   "action": {
     "default_title": "Jev",
@@ -42,6 +42,12 @@
         "default": "Alt+J"
       },
       "description": "Open the Jev prompt"
+    },
+    "toggle-conversation": {
+      "suggested_key": {
+        "default": "Alt+Shift+J"
+      },
+      "description": "Start or stop a hands-free conversation with Jev"
     }
   },
   "side_panel": {

@@ -10,6 +10,9 @@ import { systemOne, choice, noul } from "./jev.js";
 import { textCandidates, urlCandidates } from "./candidates.js";
 import { snapshotPage, performAction, highlightElements, pageText, readableText } from "./page.js";
 import * as voice from "./voice.js";
+import { Conversation } from "./conversation.js";
+import { Podcast, hostsFor } from "./podcast.js";
+import { prepareReadAlong, highlightSentence, clearReadAlong, nextReadingChunk, loadMoreBelow } from "./karaoke.js";
 import { chat, lkConfigured, DEFAULT_MODEL } from "./lk.js";
 import { focusRef, clearMarks, getSelectionText } from "./items.js";
 import { pickTarget as pickTargetFromOutline } from "./targets.js";
@@ -36,6 +39,7 @@ export const DEFAULTS = {
   ttsVoice: voice.DEFAULT_VOICE,
   sttModel: voice.DEFAULT_STT,
   speakAnswers: false,
+  podcastVoice2: "", // "" = pick a contrasting voice automatically
 };
 const loadSettings = async () => ({ ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS))) });
 const MAX_ELEMENTS = 150;
@@ -53,12 +57,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return publicRun();
       case "jev:start":
         if (run?.status === "running" || run?.status === "confirm") return { error: "A task is already running." };
-        startRun(msg.goal, msg.tabId, msg.selection || "", { voice: !!msg.voice, read: !!msg.read });
+        startRun(msg.goal, msg.tabId, msg.selection || "", { voice: !!msg.voice, read: !!msg.read, podcast: !!msg.podcast });
         return publicRun();
+      case "jev:followup": {
+        // A clicked suggestion: stop whatever is being read out, then run it.
+        if (run?.status === "running" || run?.status === "confirm") return { error: "A task is already running." };
+        const sg = (run?.suggestions || [])[msg.index];
+        if (!sg) return { error: "That suggestion is gone." };
+        const keepSel = run.tabId === msg.tabId ? run.selection || "" : "";
+        stopReadingOut();
+        await voice.stopSpeaking();
+        startRun(sg.goal, msg.tabId, keepSel, { read: sg.mode === "read", podcast: sg.mode === "podcast" });
+        return publicRun();
+      }
       // ---- voice ----
       case "voice:state":
         return { ...voice.state };
       case "voice:stop":
+        stopReadingOut();
         await voice.stopSpeaking();
         return { ...voice.state };
       case "voice:speakText": {
@@ -78,9 +94,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "voice:stopListening":
         await voice.stopListening();
         return { ...voice.state };
+      // ---- conversation (hands-free) ----
+      case "conv:start": {
+        const s = await loadSettings();
+        if (!lkConfigured(s)) return { error: "Conversation uses LiveKit Inference. Add your LiveKit URL, key and secret in Settings." };
+        return convo.start();
+      }
+      case "conv:end":
+        return convo.end(false);
+      case "conv:toggle":
+        return convo.active ? convo.end(false) : convo.start();
+      case "conv:state":
+        return convo.state();
       case "voice:event":
+        convo.onEvent(msg).catch(() => {});
+        onReadAlongEvent(msg);
+        podcast?.onVoiceEvent(msg);
         if (["tts-done", "tts-error"].includes(msg.kind)) voice.state.speaking = false;
         if (["stt-stopped", "stt-error", "mic-denied"].includes(msg.kind)) voice.state.listening = false;
+        if (msg.kind === "mic-denied" && convo.active) convo.end(false);
         if (msg.kind === "mic-denied") chrome.tabs.create({ url: chrome.runtime.getURL("mic.html") });
         if (msg.kind === "stt-stopped" && msg.text?.trim() && voice.state.listenFor?.tabId != null) {
           const { tabId, selection } = voice.state.listenFor;
@@ -140,8 +172,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 function publicRun() {
   if (!run) return { run: null };
-  const { goal, tabId, status, log, pending, step, answer, selection, speak } = run;
-  return { run: { goal, tabId, status, log, pending, step, answer, speak: !!speak, selection: selection ? selection.slice(0, 300) : "" } };
+  const { goal, tabId, status, log, pending, step, answer, selection, speak, heard, suggestions } = run;
+  return { run: { goal, tabId, status, log, pending, step, answer, heard, suggestions, speak: !!speak, selection: selection ? selection.slice(0, 300) : "" } };
 }
 
 function publish() {
@@ -169,6 +201,7 @@ function finish(status, text) {
     const said = run.answer ? spokenAnswer(run.answer) : text;
     if (said) voice.speak(run.settings, said).catch((e) => log("warn", `Voice: ${e.message}`));
   }
+  if (status === "done") suggestNext(run).catch(() => {});
 }
 
 function spokenAnswer(a) {
@@ -179,7 +212,7 @@ function spokenAnswer(a) {
 
 // ---------- the loop ----------
 async function startRun(goal, tabId, selection, opts = {}) {
-  run = { goal, tabId, selection, speak: !!opts.voice, read: !!opts.read, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
+  run = { goal, tabId, selection, speak: !!opts.voice, read: !!opts.read, podcast: !!opts.podcast, kind: opts.read ? "read" : opts.podcast ? "podcast" : "", heard: opts.heard || "", history: opts.history || null, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
   // Extension API calls keep the MV3 service worker alive during long waits (e.g. confirmation).
   run.keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   publish();
@@ -199,6 +232,7 @@ async function agentLoop(r) {
     if (!lkConfigured(s)) throw new Error("Reading aloud uses LiveKit Inference TTS. Add your LiveKit URL, key and secret in Settings.");
     return readAloud(r, s);
   }
+  if (r.podcast) return makePodcast(r, s);
   if (!s.apiKey) throw new Error("No TypeSafe API key. Open Settings in the popup and paste your key.");
   const ask = (state, questions) =>
     systemOne({ apiBase: s.apiBase, apiKey: s.apiKey, model: s.model, state, questions, signal: r.abort.signal });
@@ -210,13 +244,16 @@ async function agentLoop(r) {
   const keys = [];    // for loop detection
   let scrolls = 0;
 
+  if (r.heard) log("info", `🎙 You: "${r.heard}"`);
   log("info", `Goal: ${r.goal}`, r.selection ? `with selected text: "${r.selection.slice(0, 100)}${r.selection.length > 100 ? "…" : ""}"` : undefined);
 
   // Is this a question about the page, or something to do?
   await settle(r.tabId);
   const llm = lkConfigured(s) ? s : null;
   const kind = await classifyPrompt(r, ask, llm);
+  r.kind = kind;
   if (kind === "read") return readAloud(r, s);
+  if (kind === "podcast") return makePodcast(r, s);
   if (kind !== "task") return answerQuestion(r, ask, kind, llm, s);
 
   // Site skills: apps the generic DOM agent can't operate (canvas UIs, dialogs) get a
@@ -476,7 +513,8 @@ const EXPLAIN_KIND = "A request for a written answer about the current page: sum
 async function classifyPrompt(r, ask, llm) {
   const snap = await inject(r.tabId, snapshotPage, [60, 600]).catch(() => null);
   const kinds = llm
-    ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, read: "A request to read the page, the article or the selected text out loud, word for word" }
+    ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, read: "A request to read the page, the article or the selected text out loud, word for word",
+      podcast: "A request to turn the page, article, post, thread or selected text into a podcast, or a spoken discussion or conversation between two voices to listen to" }
     : PROMPT_KINDS;
   const questions = { kind: choice("What kind of request is `user_prompt`?", kinds) };
   if (llm) questions.wants_voice = noul("Does `user_prompt` ask for the answer to be spoken, said or read out loud?");
@@ -631,6 +669,7 @@ async function filterAnswer(r, s, kind) {
 // ---------- read aloud (LiveKit Inference TTS) ----------
 async function readAloud(r, s) {
   let title, text, truncated = false, what;
+  if (podcast) { podcast.stop(); podcast = null; }
   if (r.selection) {
     const tab = await chrome.tabs.get(r.tabId);
     title = tab.title; text = r.selection; what = "the selection";
@@ -639,17 +678,22 @@ async function readAloud(r, s) {
     if (target.kind === "item") {
       title = target.first; text = target.text; what = `"${target.first.slice(0, 60)}"`;
     } else {
-      const page = await inject(r.tabId, readableText, [60000]);
-      if (!page?.text) return finish("stopped", "Couldn't find readable text on this page.");
-      ({ title, text, truncated } = page);
-      text = `${title}. ${text}`;
-      what = `"${title}"`;
+      // The whole page: read progressively, a chunk at a time, scrolling down (and
+      // letting feeds load more) until the end of the page or until you say stop.
+      const tab = await chrome.tabs.get(r.tabId);
+      const ok = await startPageReader(r.tabId, s, tab.title);
+      if (!ok) return finish("stopped", "Couldn't find readable text on this page.");
+      r.answer = { text: "Reading aloud", note: `${tab.title} · reading down the page until the end · press ■ to stop`, items: [], spoken: true, reading: true };
+      return finish("done", "Reading the page aloud, scrolling as it goes.");
     }
   }
   const words = text.split(/\s+/).length;
   const minutes = Math.max(1, Math.round(words / 160));
   log("info", `Reading ${what} aloud: ${words.toLocaleString()} words, about ${minutes} min.`, truncated ? "Long page: reading the first 60,000 characters." : undefined);
-  await voice.speak(s, text);
+  // Sentence by sentence, so the page can highlight the one being spoken.
+  const list = text.split(/\n+/).flatMap((line) => voice.sentences(line)).filter((x) => x.trim());
+  await startReadAlong(r.tabId, list, 0, s);
+  r.readText = text;
   r.answer = { text: "Reading aloud", note: `${title} · about ${minutes} min · press ■ to stop`, items: [], spoken: true, reading: true };
   finish("done", "Reading aloud.");
 }
@@ -663,6 +707,226 @@ function pickTarget(r, s, purpose) {
     inject: (func, args) => inject(r.tabId, func, args),
   }, purpose);
 }
+
+// ---------- read-along highlight ----------
+let readAlong = null; // { tabId, list, lastSeg, highlighted }
+
+async function startReadAlong(tabId, list, from, s) {
+  const prep = await inject(tabId, prepareReadAlong, [list]).catch(() => null);
+  readAlong = { tabId, list, lastSeg: from, highlighted: !!prep?.found };
+  if (run && prep && from === 0 && !(reader && reader.chunks > 1)) log("info", prep.found ? `Read-along: following ${prep.found} of ${prep.total} sentences on the page.` : "Read-along: couldn't match the text on the page, so no highlight.");
+  await voice.speakSentences(s, list.slice(from), from);
+}
+
+// ---- progressive page reader ----
+// Reads the page chunk by chunk (about two screens at a time). When a chunk finishes it
+// asks the page for the next one, which scrolls down; at the end of the loaded content
+// it scrolls to the bottom so feeds load more, and stops when nothing more appears.
+let reader = null; // { tabId, s, waiting: resolve fn, stopped, chunks }
+const READ_CHUNK_CHARS = 1600;
+
+async function startPageReader(tabId, s, title) {
+  stopReadingOut();
+  const me = { tabId, s, stopped: false, chunks: 0 };
+  reader = me;
+  const first = await inject(tabId, nextReadingChunk, [READ_CHUNK_CHARS, true]).catch(() => null);
+  if (!first?.lines?.length) { reader = null; return false; }
+  if (run) log("info", `Reading "${title}" from ${first.lines[0].slice(0, 50)}… and continuing down the page.`);
+  readerLoop(me, first).catch((e) => { if (run) log("warn", `Reader stopped: ${e.message}`); });
+  return true;
+}
+
+async function readerLoop(me, chunk) {
+  let dry = 0;
+  while (!me.stopped && reader === me) {
+    if (!chunk?.lines?.length) {
+      // Out of text: scroll to the bottom and give lazy-loading feeds a moment.
+      const grew = await inject(me.tabId, loadMoreBelow, []).catch(() => false);
+      if (!grew && ++dry >= 2) { await voice.speak(me.s, "That's the end of the page."); break; }
+      chunk = await inject(me.tabId, nextReadingChunk, [READ_CHUNK_CHARS, false]).catch(() => null);
+      continue;
+    }
+    dry = 0;
+    me.chunks++;
+    const list = chunk.lines.flatMap((line) => voice.sentences(line)).filter((x) => x.trim());
+    const done = waitForReadingDone(me);
+    await startReadAlong(me.tabId, list, 0, me.s);
+    const reason = await done;
+    if (reason !== "finished") { me.paused = true; return; } // stopped / interrupted: "continue" resumes
+    chunk = await inject(me.tabId, nextReadingChunk, [READ_CHUNK_CHARS, false]).catch(() => null);
+  }
+  if (reader === me) reader = null;
+}
+
+function waitForReadingDone(me) {
+  return new Promise((resolve) => { me.waiting = resolve; });
+}
+
+function onReadAlongEvent(ev) {
+  if (ev.kind === "tts-done" && ev.sentences && reader?.waiting) {
+    const w = reader.waiting;
+    reader.waiting = null;
+    w(ev.reason);
+  }
+  if (!readAlong) return;
+  if (ev.kind === "tts-seg") {
+    readAlong.lastSeg = ev.idx;
+    if (readAlong.highlighted) inject(readAlong.tabId, highlightSentence, [ev.idx]).catch(() => {});
+  } else if (ev.kind === "tts-done" && ev.sentences && ev.reason !== "replaced") {
+    if (ev.reason === "finished") readAlong.lastSeg = readAlong.list.length;
+    inject(readAlong.tabId, clearReadAlong, []).catch(() => {});
+  }
+}
+
+// "Continue" / "go on" after an interruption: pick up at the sentence that was playing.
+async function continueReading() {
+  const s = await loadSettings();
+  // Interrupted podcast: pick up at the turn that was playing.
+  if (podcast?.paused && !podcast.stopped) { podcast.play().catch(() => {}); return true; }
+  // Paused page reader: finish the current chunk from where it stopped, then keep going down the page.
+  if (reader?.paused && readAlong && reader.tabId === readAlong.tabId) {
+    const me = reader;
+    me.paused = false;
+    (async () => {
+      if (readAlong.lastSeg < readAlong.list.length - 1) {
+        const done = waitForReadingDone(me);
+        await startReadAlong(me.tabId, readAlong.list, Math.max(0, readAlong.lastSeg), s);
+        if ((await done) !== "finished") { me.paused = true; return; }
+      }
+      const next = await inject(me.tabId, nextReadingChunk, [READ_CHUNK_CHARS, false]).catch(() => null);
+      await readerLoop(me, next);
+    })().catch(() => {});
+    return true;
+  }
+  if (!readAlong || readAlong.lastSeg >= readAlong.list.length - 1) return false;
+  await startReadAlong(readAlong.tabId, readAlong.list, Math.max(0, readAlong.lastSeg), s);
+  return true;
+}
+
+// Stop the page reader and any podcast (a fresh read, a new podcast, or ■ Stop).
+function stopReadingOut() {
+  if (reader) reader.stopped = true;
+  if (podcast) { podcast.stop(); podcast = null; }
+}
+
+// ---------- podcast mode ----------
+let podcast = null; // the Podcast being written / performed (see podcast.js)
+
+async function makePodcast(r, s) {
+  if (!lkConfigured(s)) throw new Error("Podcast mode uses LiveKit Inference (text model and voices). Add your LiveKit URL, key and secret in Settings.");
+  r.kind = "podcast";
+  const tab = await chrome.tabs.get(r.tabId);
+  let title = tab.title, text, what;
+  if (r.selection) {
+    text = r.selection; what = "the selection";
+  } else {
+    const target = await pickTarget(r, s, "turn into a podcast");
+    if (target.kind === "item") {
+      text = target.text; what = `"${target.first.slice(0, 60)}"`;
+    } else {
+      const page = await inject(r.tabId, pageText, [16000]).catch(() => null);
+      text = page?.text || ""; what = "the page";
+    }
+  }
+  if (!text.trim()) return finish("stopped", "Couldn't find text on this page to talk about.");
+  stopReadingOut();
+  await voice.stopSpeaking();
+  if (readAlong) { inject(readAlong.tabId, clearReadAlong, []).catch(() => {}); readAlong = null; }
+
+  const hosts = hostsFor(s);
+  let last = 0;
+  const pod = new Podcast({
+    settings: s,
+    hosts,
+    log: (k, t) => { if (run === r) log(k, t); },
+    onUpdate: (p) => {
+      if (!r.answer?.podcast) return;
+      r.answer.text = p.transcript() || "Writing the script…";
+      const n = p.turns.length;
+      r.answer.note = p.stopped ? `${hosts[0].name} & ${hosts[1].name} · stopped`
+        : p.finished ? `${hosts[0].name} & ${hosts[1].name} · finished (${n} turns)`
+        : p.paused ? `${hosts[0].name} & ${hosts[1].name} · paused at turn ${p.idx + 1} · say "continue" to resume`
+        : `${hosts[0].name} & ${hosts[1].name} · turn ${Math.min(p.idx + 1, n)} of ${n}${p.scriptDone ? "" : "+"} · press ■ to stop`;
+      if (Date.now() - last > 200 || p.finished) { last = Date.now(); publish(); }
+    },
+  });
+  podcast = pod;
+  r.answer = { text: "Writing the script…", note: `${hosts[0].name} & ${hosts[1].name}`, items: [], long: true, spoken: true, podcast: true };
+  log("info", `Podcast of ${what}: ${hosts[0].name} and ${hosts[1].name} will discuss it.`);
+  pod.play().catch((e) => log("warn", `Podcast: ${e.message}`));
+  try {
+    await pod.write({ title, url: tab.url, text: text.slice(0, 16000), goal: r.goal, signal: r.abort.signal });
+  } catch (e) {
+    pod.stop();
+    throw e;
+  }
+  if (!pod.turns.length) { pod.stop(); return finish("error", "The text model didn't return a script."); }
+  const words = pod.turns.reduce((n, t) => n + t.text.split(/\s+/).length, 0);
+  finish("done", `Script ready: ${pod.turns.length} turns, about ${Math.max(1, Math.round(words / 150))} min. Playing now.`);
+}
+
+// ---------- what next? (clickable suggestions after a run) ----------
+const SUGGEST = {
+  read: ["Summarize this page", "podcast", "What are the key takeaways?"],
+  podcast: ["Summarize this page", "read", "What are the key takeaways?"],
+  explain: ["podcast", "read", "What are the key takeaways?"],
+  task: ["Summarize this page", "What can I do on this page?"],
+  default: ["Summarize this page", "podcast", "read"],
+};
+function staticSuggestions(r) {
+  const sel = !!r.selection;
+  const make = (x) => x === "read" ? { label: sel ? "Read the selection aloud" : "Read this page aloud", goal: sel ? "Read the selected text aloud" : "Read this page aloud", mode: "read" }
+    : x === "podcast" ? { label: "Make it a podcast", goal: sel ? "Make a podcast of the selected text" : "Make a podcast of this page", mode: "podcast" }
+    : { label: sel ? x.replace("this page", "the selection") : x, goal: sel ? x.replace("this page", "the selected text") : x };
+  const list = SUGGEST[r.kind] || SUGGEST.default;
+  return list.map(make).filter((x) => x.goal.toLowerCase() !== r.goal.toLowerCase());
+}
+
+async function suggestNext(r) {
+  const base = staticSuggestions(r);
+  r.suggestions = base.slice(0, 3);
+  publish();
+  const s = r.settings;
+  if (!s || !lkConfigured(s)) return;
+  // Page-specific ideas from the text model, next to the built-in ones.
+  const page = await inject(r.tabId, pageText, [1500]).catch(() => null);
+  const result = r.answer ? `${r.answer.text}`.slice(0, 400) : (r.log.at(-1)?.text || "");
+  const out = await chat(s, [
+    { role: "system", content: "You suggest what a user might want to do next with a browser assistant. It can answer questions about the page, summarize, find/highlight/hide items by meaning, read aloud, make a two-voice podcast, and click, type and navigate on the page. Reply with only a JSON array of 3 short requests (each under 8 words, written as the user would type them), specific to this page and the last result. Don't repeat the last request." },
+    { role: "user", content: `Page: ${page?.title || ""} (${page?.url || ""})\nPage text (start): ${(page?.text || "").slice(0, 1200)}\n\nLast request: ${r.goal}\nResult: ${result}` },
+  ], { maxTokens: 150 }).catch(() => "");
+  let ideas = [];
+  try { ideas = JSON.parse((out.match(/\[[\s\S]*\]/) || ["[]"])[0]); } catch (_) {}
+  const seen = new Set([r.goal.toLowerCase(), ...base.map((x) => x.goal.toLowerCase())]);
+  const extra = ideas.filter((x) => typeof x === "string" && x.trim() && x.length <= 80)
+    .map((x) => x.trim().replace(/[.]$/, ""))
+    .filter((x) => !seen.has(x.toLowerCase()) && seen.add(x.toLowerCase()))
+    .slice(0, 3)
+    .map((x) => ({ label: x, goal: x, ai: true }));
+  if (run !== r || !extra.length) return;
+  r.suggestions = [...base.slice(0, 2), ...extra];
+  publish();
+}
+
+// ---------- hands-free conversation ----------
+const activeTab = async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+const convo = new Conversation({
+  loadSettings,
+  startRun: async (goal, meta) => {
+    if (run && (run.status === "running" || run.status === "confirm")) { run.abort.abort(); run.confirm?.(false); finish("stopped", "Interrupted."); }
+    const tab = await activeTab();
+    if (!tab) return null;
+    await startRun(goal, tab.id, "", { voice: true, heard: meta.heard, history: meta.history });
+    return run;
+  },
+  abortRun: () => { if (run && (run.status === "running" || run.status === "confirm")) { run.abort.abort(); run.confirm?.(false); finish("stopped", "Stopped."); } },
+  continueReading,
+  log: (k, t) => { if (run) log(k, t); },
+  notify: (state) => chrome.runtime.sendMessage({ type: "conv:update", state }).catch(() => {}),
+});
+chrome.commands.onCommand.addListener((cmd) => {
+  if (cmd === "toggle-conversation") (convo.active ? convo.end(true) : convo.start()).catch(() => {});
+});
 
 // ---------- text model (LiveKit Inference) ----------
 async function writtenAnswer(r, llm) {
@@ -683,6 +947,7 @@ async function writtenAnswer(r, llm) {
   const speaker = r.speak ? await voice.speakStream(llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
   const text = await chat(llm, [
     { role: "system", content: "You answer questions about the web page the user is looking at, using only the page content provided. Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the page doesn't contain the answer, say so." },
+    ...(r.history?.length ? [{ role: "system", content: `Conversation so far (for context):\n${r.history.map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`).join("\n")}` }] : []),
     { role: "user", content: `Page title: ${page.title}\nURL: ${page.url}\n\n${r.selection ? "Text the user selected on the page" : page.item ? "The post or item on the page the user means" : "Page text"}:\n${page.text}\n\nQuestion: ${r.goal}` },
   ], {
     signal: r.abort.signal,

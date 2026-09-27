@@ -26,17 +26,50 @@ function ttsStop(reason = "stopped") {
   if (!tts) return;
   const t = tts;
   tts = null;
+  const played = t.next > 0 ? Math.min(1, Math.max(0, (t.ctx.currentTime - (t.startAt || 0)) / Math.max(0.01, t.next - (t.startAt || 0)))) : 0;
+  lastSpoken = { words: t.words, until: Date.now() + 1500 };
   try { t.ws.close(); } catch (_) {}
   for (const src of t.sources) { try { src.stop(); } catch (_) {} }
   t.ctx.close().catch(() => {});
   clearInterval(t.doneTimer);
-  emit("tts-done", { reason });
+  clearInterval(t.segTimer);
+  emit("tts-done", { reason, played: reason === "finished" ? 1 : played, seg: t.seg, sentences: t.segs.length > 0, sid: t.sid || null });
 }
 
-function ttsStart({ url, create, sampleRate }) {
+// Words Jev is saying (or just said), to tell its own voice coming back through the
+// mic apart from you talking.
+let lastSpoken = { words: new Set(), until: 0 };
+const wordsOf = (t) => (t.toLowerCase().match(/[a-z0-9']+/g) || []);
+function isEcho(text) {
+  const w = wordsOf(text);
+  if (!w.length) return true;
+  const ref = tts ? tts.words : Date.now() < lastSpoken.until ? lastSpoken.words : null;
+  if (!ref || !ref.size) return false;
+  const hit = w.filter((x) => ref.has(x)).length;
+  return hit / w.length >= 0.7;
+}
+const ttsPlaying = () => !!(tts && tts.ctx.currentTime < tts.next);
+
+function ttsStart({ url, create, sampleRate, sid }) {
   ttsStop("replaced");
   const ctx = new AudioContext({ sampleRate });
-  const t = { ws: new WebSocket(url), ctx, next: 0, queue: [], sources: [], gotDone: false, bytes: 0, flushed: false };
+  const t = { sid, ws: new WebSocket(url), ctx, next: 0, queue: [], sources: [], gotDone: false, bytes: 0, flushed: false, words: new Set(), segs: [], chars: 0, seg: -1 };
+  // Read-along: which sentence is playing now. Sentence start times are estimated in
+  // proportion to their length over the audio produced (exact total once "done").
+  t.segTimer = setInterval(() => {
+    if (tts !== t || !t.segs.length || t.startAt === undefined) return;
+    const played = ctx.currentTime - t.startAt;
+    if (played < 0) return;
+    const produced = t.next - t.startAt;
+    const total = t.gotDone ? produced : Math.max(produced, t.chars * 0.068);
+    let acc = 0, cur = t.segs[0].idx;
+    for (const sg of t.segs) {
+      if ((acc / t.chars) * total > played) break;
+      cur = sg.idx;
+      acc += sg.chars;
+    }
+    if (cur !== t.seg) { t.seg = cur; emit("tts-seg", { idx: cur }); }
+  }, 120);
   tts = t;
   const send = (obj) => (t.ws.readyState === 1 ? t.ws.send(JSON.stringify(obj)) : t.queue.push(obj));
   t.send = send;
@@ -59,6 +92,7 @@ function ttsStart({ url, create, sampleRate }) {
       src.buffer = buf;
       src.connect(ctx.destination);
       const at = Math.max(ctx.currentTime + 0.03, t.next);
+      if (t.startAt === undefined) t.startAt = at;
       src.start(at);
       t.next = at + buf.duration;
       t.sources.push(src);
@@ -84,7 +118,7 @@ function ttsStart({ url, create, sampleRate }) {
 // ---------- STT ----------
 let stt = null;
 
-async function sttStart({ url, create }) {
+async function sttStart({ url, create, continuous, endpointMs }) {
   await sttStop(true);
   let stream;
   try {
@@ -96,7 +130,7 @@ async function sttStart({ url, create }) {
   const ctx = new AudioContext({ sampleRate: 16000 });
   const source = ctx.createMediaStreamSource(stream);
   const proc = ctx.createScriptProcessor(2048, 1, 1);
-  const s = { ws: new WebSocket(url), ctx, stream, proc, source, queue: [], finals: [], ended: false };
+  const s = { ws: new WebSocket(url), ctx, stream, proc, source, queue: [], finals: [], ended: false, continuous: !!continuous, endpointMs: endpointMs || 900, timer: null };
   stt = s;
   const send = (obj) => (s.ws.readyState === 1 ? s.ws.send(JSON.stringify(obj)) : s.queue.push(obj));
   s.send = send;
@@ -109,6 +143,28 @@ async function sttStart({ url, create }) {
     let data;
     try { data = JSON.parse(ev.data); } catch (_) { return; }
     const text = data.transcript || data.text || "";
+    const speech = data.type === "interim_transcript" || data.type === "preflight_transcript" || data.type === "final_transcript";
+    if (speech && s.continuous) {
+      // Conversation mode: drop Jev's own voice, let you interrupt it, and cut the
+      // stream into utterances at pauses.
+      if (!text.trim() || isEcho(text)) return;
+      if (ttsPlaying() && wordsOf(text).length >= 2) { ttsStop("barge-in"); emit("barge-in", { text }); }
+      clearTimeout(s.timer);
+      if (data.type === "final_transcript") {
+        s.finals.push(text.trim());
+        s.lastFinal = Date.now();
+      }
+      const heard = [...s.finals, data.type === "final_transcript" ? "" : text].join(" ").trim();
+      emit(data.type === "final_transcript" ? "stt-final" : "stt-interim", { text: heard });
+      if (s.finals.length) {
+        s.timer = setTimeout(() => {
+          const said = s.finals.join(" ").trim();
+          s.finals = [];
+          if (said) emit("stt-utterance", { text: said });
+        }, s.endpointMs);
+      }
+      return;
+    }
     if (data.type === "interim_transcript" || data.type === "preflight_transcript") {
       emit("stt-interim", { text: [...s.finals, text].join(" ").trim() });
     } else if (data.type === "final_transcript") {
@@ -120,6 +176,8 @@ async function sttStart({ url, create }) {
     }
   };
   s.ws.onerror = () => emit("stt-error", { message: "Couldn't connect to LiveKit Inference STT." });
+  // Long conversations: if the service closes the stream, say so and the service worker reconnects.
+  s.ws.onclose = () => { if (stt === s && !s.ended && s.continuous) { sttStop(true); emit("stt-closed"); } };
   let level = 0, lastLevelEmit = 0;
   proc.onaudioprocess = (e) => {
     if (stt !== s || s.ended) return;
@@ -162,7 +220,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== "offscreen") return;
   switch (msg.type) {
     case "tts:start": ttsStart(msg); break;
-    case "tts:append": tts?.send({ type: "input_transcript", transcript: msg.text, generation_config: msg.generation_config || {}, extra: {} }); break;
+    case "tts:append":
+      if (tts) {
+        for (const w of wordsOf(msg.text)) tts.words.add(w);
+        if (msg.idx != null) { tts.segs.push({ idx: msg.idx, chars: msg.text.length }); tts.chars += msg.text.length; }
+        tts.send({ type: "input_transcript", transcript: msg.text, generation_config: msg.generation_config || {}, extra: {} });
+      }
+      break;
     case "tts:end": if (tts && !tts.flushed) { tts.flushed = true; tts.send({ type: "session.flush" }); } break;
     case "tts:stop": ttsStop("stopped"); break;
     case "stt:start": sttStart(msg); break;

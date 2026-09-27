@@ -98,3 +98,16 @@ select { width: 100%; font: inherit; color: var(--fg); background: var(--field);
 .voice-bar.error .voice-dot { background: var(--err); animation: none; }
 @keyframes jevBlink { 50% { opacity: .3; } }
 .answer-head span { display: flex; gap: 4px; }
+#talkBtn.talking { background: #059669; border-color: #059669; color: #fff; animation: jevPulseG 1.6s ease-in-out infinite; }
+@keyframes jevPulseG { 50% { box-shadow: 0 0 0 5px rgba(5,150,105,.25); } }
+.conv-box { list-style: none; margin: 8px 0 0; padding: 0; max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.conv-box li { padding: 5px 9px; border-radius: 10px; max-width: 88%; font-size: 12px; line-height: 1.35; white-space: pre-line; }
+.conv-box li.user { align-self: flex-end; background: var(--accent); color: var(--accent-fg); }
+.conv-box li.assistant { align-self: flex-start; background: var(--field); border: 1px solid var(--border); }
+html.panel .conv-box { max-height: 40vh; }
+.suggest { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; }
+.suggest-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding-top: 5px; }
+.suggest-list { display: flex; flex-wrap: wrap; gap: 6px; }
+button.chip { background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 12px; white-space: normal; text-align: left; }
+button.chip:hover { border-color: var(--accent); color: var(--accent); }
+button.chip.ai::before { content: "✦ "; color: var(--accent); }
