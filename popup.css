@@ -117,3 +117,5 @@ button.chip.ai::before { content: "✦ "; color: var(--accent); }
 #layaStatus.ok { color: var(--ok); } #layaStatus.err { color: var(--err); }
 #clearBtn { display: inline-flex; align-items: center; padding: 4px 6px; }
 #clearBtn:not(:disabled):hover { color: var(--err); }
+.help a { color: var(--accent); }
+#pronunciations { min-height: 44px; }

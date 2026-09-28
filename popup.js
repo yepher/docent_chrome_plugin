@@ -7,7 +7,7 @@ const DEFAULTS = {
   decider: "jev", layaBuild: "q4e8", layaDevice: "auto", layaModelBase: "",
   lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
   iconOpens: "popup",
-  ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "", podcastExpressive: true,
+  ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "", podcastExpressive: true, pronunciations: "LiveKit = Lyve Kit",
 };
 const IN_PANEL = new URLSearchParams(location.search).has("panel");
 if (IN_PANEL) document.documentElement.classList.add("panel");
@@ -106,6 +106,15 @@ $("ttsVoice").onchange = () => {
   const custom = $("ttsVoice").value === CUSTOM;
   $("ttsVoiceCustom").hidden = !custom;
   if (custom) $("ttsVoiceCustom").focus();
+};
+// Hear the pronunciation list with the chosen voice, before saving.
+$("pronTest").onclick = async () => {
+  const f = readForm();
+  const words = f.pronunciations.split(/\n+/).map((l) => l.split("=")[0].trim()).filter(Boolean);
+  if (!words.length) return;
+  const text = `${words.join(". ")}. I'm testing how I say ${words[0]} in a sentence.`;
+  const r = await send({ type: "voice:speakText", ttsVoice: f.ttsVoice, pronunciations: f.pronunciations, text });
+  if (r?.error) lkStatus(r.error, "err");
 };
 $("ttsPreview").onclick = async () => {
   const f = readForm();

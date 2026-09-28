@@ -46,7 +46,8 @@ export const DEFAULTS = {
   sttModel: voice.DEFAULT_STT,
   speakAnswers: false,
   podcastVoice2: "", // "" = pick a contrasting voice automatically
-  podcastExpressive: true, // emotion / laughs / pauses markup for voices that support it (see expressive.js)
+  podcastExpressive: true,
+  pronunciations: voice.DEFAULT_PRONUNCIATIONS, // "word = say as", one per line // emotion / laughs / pauses markup for voices that support it (see expressive.js)
 };
 const loadSettings = async () => ({ ...DEFAULTS, ...(await chrome.storage.local.get(Object.keys(DEFAULTS))) });
 const MAX_ELEMENTS = 150;
@@ -110,7 +111,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "voice:speakText": {
         const s = await loadSettings();
         if (!lkConfigured(s)) return { error: "Set up LiveKit in Settings to use voice." };
-        await voice.speak(msg.ttsVoice ? { ...s, ttsVoice: msg.ttsVoice } : s, msg.text);
+        // Settings can preview unsaved choices (a voice, the pronunciation list).
+        await voice.speak({ ...s, ...(msg.ttsVoice ? { ttsVoice: msg.ttsVoice } : {}), ...(msg.pronunciations != null ? { pronunciations: msg.pronunciations } : {}) }, msg.text);
         return { ...voice.state };
       }
       case "voice:listen": {

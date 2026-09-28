@@ -63,6 +63,26 @@ async function setAuth(s) {
 }
 
 // Make text sound right: drop markdown, URLs and bullet markers.
+// Pronunciations: words the voices say wrong, respelled just before speaking (the page,
+// transcript and read-along highlight keep the real spelling). One per line, "word = say as";
+// the user's list from Settings, with LiveKit ("Live" as in "life") built in.
+export const DEFAULT_PRONUNCIATIONS = "LiveKit = Lyve Kit";
+const lexiconCache = new Map();
+function lexicon(list) {
+  const src = list == null ? DEFAULT_PRONUNCIATIONS : String(list);
+  if (!lexiconCache.has(src)) {
+    const rules = src.split(/\n+/).map((l) => l.split("=")).filter((p) => p.length === 2 && p[0].trim() && p[1].trim())
+      .map(([w, say]) => [new RegExp(`(?<![\\p{L}\\p{N}])${w.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "giu"), say.trim()]);
+    lexiconCache.set(src, rules);
+  }
+  return lexiconCache.get(src);
+}
+export function pronounce(text, list) {
+  let t = String(text);
+  for (const [re, say] of lexicon(list)) t = t.replace(re, say);
+  return t;
+}
+
 export function forSpeech(text) {
   return String(text)
     .replace(/```[\s\S]*?```/g, " ")
@@ -115,7 +135,7 @@ export async function speakStream(s, opts = {}) {
     const keep = !all && parts.length && !/[.!?…]$/.test(buffer.trim()) ? parts.pop() : "";
     for (const p of parts) {
       // raw: text already prepared for this voice (e.g. expressive markup) — don't clean it
-      const clean = opts.raw ? p.trim() : forSpeech(p);
+      const clean = pronounce(opts.raw ? p.trim() : forSpeech(p), s.pronunciations);
       if (clean) toOffscreen({ type: "tts:append", text: clean + " ", generation_config: gen });
     }
     buffer = keep;
@@ -141,7 +161,7 @@ export async function speakSentences(s, list, offset = 0) {
   });
   state.speaking = true;
   list.forEach((raw, i) => {
-    const clean = forSpeech(raw);
+    const clean = pronounce(forSpeech(raw), s.pronunciations);
     if (clean) toOffscreen({ type: "tts:append", text: clean + " ", idx: offset + i, generation_config: gen });
   });
   await toOffscreen({ type: "tts:end" });

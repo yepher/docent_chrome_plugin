@@ -71,6 +71,7 @@
 
     <h2>Text model (LiveKit Inference) <span class="optional">optional</span></h2>
     <p class="help">Writes text that isn't in your prompt (replies, messages) and answers open questions like "summarize this page".</p>
+    <p class="help">Find your URL, API key and secret in <a href="https://cloud.livekit.io/projects/p_/settings/keys" target="_blank" rel="noopener">LiveKit Cloud → Settings → API keys</a> (sign in, then <em>Create key</em>). No account yet? <a href="https://cloud.livekit.io/" target="_blank" rel="noopener">Sign up for LiveKit Cloud</a>.</p>
     <label>LiveKit URL
       <input id="lkUrl" type="text" placeholder="wss://your-project.livekit.cloud" autocomplete="off" />
     </label>
@@ -108,6 +109,13 @@
     <label class="check"><input id="podcastExpressive" type="checkbox" /> Expressive podcasts (emotion, pauses, laughs; Cartesia and Fish Audio voices)</label>
     <label>Speech-to-text model <select id="sttModel"></select></label>
     <label class="check"><input id="speakAnswers" type="checkbox" /> Always speak answers aloud</label>
+    <label>Pronunciations <span class="optional">one per line: word = say as</span>
+      <div class="row tight">
+        <textarea id="pronunciations" rows="2" placeholder="LiveKit = Lyve Kit"></textarea>
+        <button type="button" id="pronTest" class="secondary small" title="Hear these words with the voice above">▶</button>
+      </div>
+    </label>
+    <p class="help">If a word still sounds wrong, try another spelling and press ▶. Voices differ, so for LiveKit try e.g. <em>Lyve Kit</em>, <em>Lyve-kit</em>, <em>Laiv Kit</em> or <em>Live Kit</em> (two words).</p>
     <p class="help">Answers are spoken automatically when you ask with the 🎤 or say "tell me" / "read it out". 🔊 reads the page (or your selection) aloud. 🎧 turns it into a two-host podcast.</p>
 
     <div class="row end">

@@ -195,7 +195,7 @@ export class Podcast {
     const turns = this.turns.map((t, idx) => {
       const sp = specs[this.d.hosts[t.host].voice];
       const v = this.d.hosts[t.host].voice;
-      return { idx, url: sp.url, create: sp.create, gen: sp.gen, text: this.d.expressive ? expr.forVoice(v, t.text) : voice.forSpeech(t.text) };
+      return { idx, url: sp.url, create: sp.create, gen: sp.gen, text: voice.pronounce(this.d.expressive ? expr.forVoice(v, t.text) : voice.forSpeech(t.text), this.d.settings.pronunciations) };
     });
     const sampleRate = Object.values(specs)[0].sampleRate;
     return chrome.runtime.sendMessage({ target: "offscreen", type: "pod:export", pod: this.id, turns, sampleRate });

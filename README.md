@@ -115,6 +115,8 @@ The Answer card lists the matches. Click one, or use ◀ ▶, to scroll to it. *
 
 ## Text model (optional, LiveKit Inference)
 
+Your LiveKit URL, API key and secret are in [LiveKit Cloud → Settings → API keys](https://cloud.livekit.io/projects/p_/settings/keys) (sign in, then *Create key*). Settings links there too.
+
 Jev picks; it doesn't write. For text that isn't in your prompt, the extension can call an LLM through [LiveKit Inference](https://docs.livekit.io/agents/models/). In ⚙ → *Text model*, enter your LiveKit project URL, API key and secret, then choose a model (↻ loads the list from the gateway; you can also type any `provider/model` id). **Test text model** sends a one-word request and shows the reply and latency.
 
 It's used in two places, and only when Jev asks for it:
