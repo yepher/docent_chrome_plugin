@@ -20,6 +20,7 @@ import { pdfFor, pdfText, pdfChunks, endOfBody, bodyStart, goToPage } from "./pd
 import { chat, lkConfigured, DEFAULT_MODEL } from "./lk.js";
 import { focusRef, clearMarks, getSelectionText } from "./items.js";
 import { pickTarget as pickTargetFromOutline } from "./targets.js";
+import { pageSkeleton, applyEdits, undoEdits } from "./restyle.js";
 import { modeFor, runFilter, applyRules, reapplyRules, getRules, saveRule, updateRule, deleteRule, forgetTab } from "./rules.js";
 
 export const DEFAULTS = {
@@ -90,6 +91,10 @@ Listen
 - "Make this a podcast", "A 5 minute podcast of this article" (two hosts; downloadable as MP3)
 - Add "tell me" or "out loud" to have an answer spoken
 
+Change the page
+- "Change the page background to red", "Make the text bigger", "Make this page dark"
+- "Replace every "colour" with "color"", then "Undo page changes" to put it back
+
 Do things for you
 - "Search for mechanical keyboards and open the first result"
 - "Go to example.com", "Type "hello" in the message box"
@@ -105,7 +110,7 @@ Talk hands-free (Alt+Shift+J)
 
 Keys: Alt+J opens Docent, Alt+Shift+P pauses or resumes speech, ■ stops.
 Settings (⚙): the decision model (Jev with a TypeSafe key, or Laya in your browser) and LiveKit for summaries, voice and podcasts.`;
-const HELP_SPOKEN = "You can ask me questions about the page, or ask me to summarize it, read it aloud, or make it a podcast. I can highlight or hide things by meaning, click and type for you, and read or summarize your clipboard. Say stop, continue or repeat that while I'm talking, and goodbye to finish. The full list is in the panel.";
+const HELP_SPOKEN = "You can ask me questions about the page, or ask me to summarize it, read it aloud, or make it a podcast. I can highlight or hide things by meaning, change how the page looks, click and type for you, and read or summarize your clipboard. Say stop, continue or repeat that while I'm talking, and goodbye to finish. The full list is in the panel.";
 function showHelp(r, s) {
   r.kind = "help";
   r.answer = { text: HELP_TEXT, note: "", items: [], long: true, spoken: true };
@@ -310,6 +315,7 @@ async function agentLoop(r) {
   r.settings = s;
   if (s.speakAnswers && lkConfigured(s)) r.speak = true;
   if (HELP.test(r.goal.trim()) && !r.read && !r.podcast) return showHelp(r, s);
+  if (UNDO_CHANGES.test(r.goal.trim())) return undoChanges(r);
   if (CLIPBOARD.test(r.goal)) {
     await useClipboard(r);
     // Clear-cut wordings don't need the decision model (or a readable page).
@@ -614,6 +620,17 @@ const PROMPT_KINDS = {
   hide: "A request to hide, remove, filter out, dim or fade certain things on the page, e.g. 'hide sponsored results'",
 };
 
+const CHANGE_KIND = "A request to change how the current page itself looks or reads, in place: its background, colors, fonts, text size, spacing, width, dark or light look, or rewriting or replacing words shown on it. Not clicking the site's own controls";
+// Clear-cut restyling requests, whichever decision model is in use.
+const CHANGE_QUICK = /^(please )?(change|make|set|turn|switch|give|restyle|recolou?r|increase|decrease|enlarge|shrink)\b.*\b(background|colou?rs?|fonts?|text|dark|light|bigger|smaller|larger|wider|narrower|bold|headings?|theme|contrast|spacing|readable)\b/i;
+const CHANGE_NOT = /\b(search|field|box|dropdown|menu|button|settings?|option|form|input|podcast)\b/i;
+const UNDO_CHANGES = /^(please )?(undo|reset|revert|restore|remove)\b.*\b(changes?|styles?|styling|restyl\w*|edits?)\b|^(please )?(reset|restore|revert) (the|this) page\b/i;
+// The kinds a prompt can be sorted into; the ones that need writing only with a text model.
+const kindsFor = (llm) => llm
+  ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, change: CHANGE_KIND, read: "A request to read the page, the article or the selected text out loud, word for word",
+      podcast: "A request to turn the page, article, post, thread or selected text into a podcast, or a spoken discussion or conversation between two voices to listen to" }
+  : PROMPT_KINDS;
+
 const EXPLAIN_KIND = "A request for a written answer about the current page: summarize, explain, describe, compare, translate, or an open question that isn't yes/no, a count, a list or one value";
 
 // Laya is weaker than Jev at sorting prompts into many kinds, so with Laya: clear-cut
@@ -673,19 +690,16 @@ function onLayaProgress(msg) {
 }
 
 async function classifyPrompt(r, ask, llm) {
+  if (llm && !r.selection && CHANGE_QUICK.test(r.goal.trim()) && !CHANGE_NOT.test(r.goal)) {
+    log("info", "Understood as: change", "from the wording");
+    return "change";
+  }
   if (isLaya(r.settings)) {
-    const kinds0 = llm
-      ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, read: "A request to read the page, the article or the selected text out loud, word for word",
-          podcast: "A request to turn the page, article, post, thread or selected text into a podcast, or a spoken discussion or conversation between two voices to listen to" }
-      : PROMPT_KINDS;
-    const k = await classifyWithoutJev(r, llm, kinds0);
+    const k = await classifyWithoutJev(r, llm, kindsFor(llm));
     if (k) return k;
   }
   const snap = await inject(r.tabId, snapshotPage, [60, 600]).catch(() => null);
-  const kinds = llm
-    ? { ...PROMPT_KINDS, explain: EXPLAIN_KIND, read: "A request to read the page, the article or the selected text out loud, word for word",
-      podcast: "A request to turn the page, article, post, thread or selected text into a podcast, or a spoken discussion or conversation between two voices to listen to" }
-    : PROMPT_KINDS;
+  const kinds = kindsFor(llm);
   const questions = { kind: choice("What kind of request is `user_prompt`?", kinds) };
   if (llm) questions.wants_voice = noul("Does `user_prompt` ask for the answer to be spoken, said or read out loud?");
   const res = await ask(
@@ -707,6 +721,7 @@ async function classifyPrompt(r, ask, llm) {
 // docs' counting pattern: never ask the model to count), a Choice for lookup.
 async function answerQuestion(r, ask, kind, llm, s) {
   if (kind === "explain") return writtenAnswer(r, llm);
+  if (kind === "change") return changePage(r, llm);
   if (kind === "find" || kind === "hide") return filterAnswer(r, s, kind);
   let snap, items;
   if (r.selection) {
@@ -816,6 +831,73 @@ async function answerQuestion(r, ask, kind, llm, s) {
   r.answer = answer;
   log("answer", answer.text, answer.note);
   finish("done", ids.length ? `Answered. Matches are outlined on the page for 8 seconds.` : "Answered.");
+}
+
+// ---------- change the page in place (restyle.js) ----------
+const CHANGE_PROMPT = `You change how a web page looks or reads, for a browser extension that applies your output to the page the user has open.
+You get the user's request and an outline of the page: indented elements written as CSS selectors; "bg:<color>" marks an element whose painted background covers a notable part of the screen; quoted text is the element's own text.
+Reply with JSON only:
+{"css":"<CSS rules or empty>","edits":[{"selector":"<CSS selector>","text":"<new text>"},{"find":"<exact text on the page>","replace":"<new text>"}],"summary":"<one short sentence saying what was changed>"}
+Rules:
+- Use css for anything about appearance. Put !important on every declaration.
+- A page-wide background or color change must also restyle the elements marked bg: that cover the page, or they will hide it.
+- Keep text readable: when the background changes a lot, set a contrasting text color too.
+- Use selectors that appear in the outline. No url(), no @import, no content from other sites.
+- Use edits only to change wording: selector+text for one element's text, find+replace for a word or phrase everywhere.
+- If the request can't be done with CSS or text edits, return empty css and edits and say why in summary.`;
+
+// The CSS added to each tab this session, so it can be taken out again.
+const cssKey = (tabId) => `docentCss:${tabId}`;
+const addedCss = async (tabId) => (await chrome.storage.session.get(cssKey(tabId)))[cssKey(tabId)] || [];
+
+async function changePage(r, llm) {
+  if (!llm) return finish("stopped", "Changing a page needs a text model to write the change. Add your LiveKit URL, key and secret in Settings.");
+  if (r.pdf) return finish("stopped", "Docent can't change how a PDF looks in Chrome's viewer.");
+  let sk;
+  try {
+    sk = await inject(r.tabId, pageSkeleton, [9000]);
+  } catch (e) {
+    throw new Error(`Can't change this page (${e.message}). Chrome blocks extensions on chrome:// pages, the Web Store and some viewers.`);
+  }
+  if (!sk?.skeleton) return finish("stopped", "Couldn't read this page's structure.");
+  const model = llm.lkModel || DEFAULT_MODEL;
+  log("info", `Asking ${model} to write the change…`);
+  const out = await chat(llm, [
+    { role: "system", content: CHANGE_PROMPT },
+    { role: "user", content: `Request: ${r.goal}\n\nPage: ${sk.title} (${sk.url})\nNow: body background ${sk.body.background}, text ${sk.body.color}, font ${sk.body.font}\n\nOutline:\n${sk.skeleton}` },
+  ], { signal: r.abort.signal, maxTokens: 1500 });
+  let j = {};
+  try { j = JSON.parse((out.match(/\{[\s\S]*\}/) || ["{}"])[0]); } catch (_) {}
+  // Styling only: nothing that would make the page load something from elsewhere.
+  const css = String(j.css || "").replace(/@import[^;]*;?/gi, "").replace(/url\([^)]*\)/gi, "none").trim();
+  const edits = Array.isArray(j.edits) ? j.edits.slice(0, 40) : [];
+  if (!css && !edits.length) return finish("stopped", j.summary ? `Nothing changed: ${j.summary}` : "The text model didn't return a change for this page.");
+  if (css) {
+    // The user origin outranks the page's own !important rules.
+    await chrome.scripting.insertCSS({ target: { tabId: r.tabId }, css, origin: "USER" });
+    await chrome.storage.session.set({ [cssKey(r.tabId)]: [...(await addedCss(r.tabId)), css] });
+    log("info", "Added CSS to the page.", css.length > 600 ? css.slice(0, 600) + "…" : css);
+  }
+  const edited = edits.length ? await inject(r.tabId, applyEdits, [edits]).catch(() => 0) : 0;
+  if (edits.length) log(edited ? "info" : "warn", edited ? `Changed text in ${edited} place${edited === 1 ? "" : "s"}.` : "The text to change wasn't found on the page.");
+  r.answer = {
+    text: String(j.summary || "Changed the page.").slice(0, 400),
+    note: `Written by ${model}. Only this tab is changed, until it reloads. "Undo page changes" puts it back.`,
+    items: [], long: true,
+  };
+  log("answer", r.answer.text, r.answer.note);
+  finish("done", "Page changed.");
+}
+
+async function undoChanges(r) {
+  r.kind = "undo";
+  const list = await addedCss(r.tabId);
+  for (const css of list) await chrome.scripting.removeCSS({ target: { tabId: r.tabId }, css, origin: "USER" }).catch(() => {});
+  await chrome.storage.session.remove(cssKey(r.tabId));
+  const restored = (await inject(r.tabId, undoEdits, []).catch(() => 0)) || 0;
+  if (!list.length && !restored) return finish("done", "There were no Docent changes on this page to undo. Reloading the page also resets it.");
+  r.answer = { text: "Page changes undone", note: `${list.length} style change${list.length === 1 ? "" : "s"} and ${restored} text edit${restored === 1 ? "" : "s"} removed.`, items: [] };
+  finish("done", "Undone.");
 }
 
 // Pause the run until you allow or cancel in the popup.
@@ -1169,6 +1251,7 @@ const SUGGEST = {
   podcast: ["download", "Summarize this page", "read"],
   explain: ["podcast", "read", "What are the key takeaways?"],
   task: ["Summarize this page", "What can I do on this page?"],
+  change: ["Undo page changes", "Summarize this page", "read"],
   default: ["Summarize this page", "podcast", "read"],
 };
 function staticSuggestions(r) {
