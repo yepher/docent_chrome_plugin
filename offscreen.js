@@ -1,5 +1,5 @@
-// Offscreen document: plays LiveKit Inference TTS audio and captures the mic for
-// LiveKit Inference STT. It lives outside the popup, so speech keeps playing after
+// Offscreen document: plays LiveKit Inference TTS audio, captures the mic for
+// LiveKit Inference STT, and reads the clipboard. It lives outside the popup, so speech keeps playing after
 // the popup closes. The service worker sets the gateway's Authorization header on
 // these WebSockets with a declarativeNetRequest rule (browser WebSockets can't set
 // headers themselves).
@@ -427,8 +427,25 @@ function pdfParagraphs(items, page) {
   }).filter((p) => (p.text.match(/[\p{L}\p{N}]/gu) || []).length >= 2);
 }
 
+// ---------- clipboard ----------
+// The service worker has no clipboard access, and navigator.clipboard.readText() needs a
+// focused document, so paste into a throwaway textarea (allowed by "clipboardRead").
+function clipboardRead() {
+  const ta = document.createElement("textarea");
+  document.body.append(ta);
+  ta.focus();
+  const ok = document.execCommand("paste");
+  const text = ta.value;
+  ta.remove();
+  return ok ? { text } : { error: "Chrome didn't allow reading the clipboard." };
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== "offscreen") return;
+  if (msg.type === "clipboard:read") {
+    sendResponse(clipboardRead());
+    return;
+  }
   if (msg.type === "pdf:extract") {
     pdfExtract(msg).then(sendResponse, (e) => sendResponse({ error: e.message || String(e) }));
     return true;

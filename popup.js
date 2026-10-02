@@ -205,20 +205,25 @@ $("saveSettings").onclick = async () => {
 };
 
 // ---------- run ----------
+let lastGoal = ""; // ↑ in the empty prompt brings it back
 $("promptForm").onsubmit = async (e) => {
   e.preventDefault();
   const goal = $("prompt").value.trim();
-  if (!goal) return;
+  if (!goal || $("runBtn").disabled) return; // a task is running: keep what you typed for later
   const tab = await activeTab();
   if (!tab) return;
   const selection = pending && pending.tabId === tab.id ? pending.selection : "";
   const res = await send({ type: "jev:start", goal, tabId: tab.id, selection });
   setPending(null);
-  if (res?.error) render({ status: "error", log: [{ kind: "error", text: res.error }] });
-  else render(res.run);
+  if (res?.error) return render({ status: "error", log: [{ kind: "error", text: res.error }] });
+  // Started: clear the box so it's ready for the next request.
+  lastGoal = goal;
+  $("prompt").value = "";
+  render(res.run);
 };
 $("prompt").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("promptForm").requestSubmit();
+  if (e.key === "ArrowUp" && !$("prompt").value && lastGoal) { e.preventDefault(); $("prompt").value = lastGoal; }
 });
 $("stopBtn").onclick = () => send({ type: "jev:stop" }).then((r) => render(r.run));
 $("copyBtn").onclick = async () => {
@@ -289,16 +294,18 @@ if (IN_PANEL) {
 
 // ---------- selection from the right-click menu ----------
 let pending = null;
+let basePlaceholder = "What should Docent do on this page? e.g. search for \"mechanical keyboards\" and open the first result";
 function setPending(p) {
   pending = p && p.selection ? p : null;
   $("ctx").hidden = !pending;
   if (pending) {
     $("ctxText").textContent = pending.selection.replace(/\s+/g, " ").slice(0, 200);
     $("ctxText").title = pending.selection.slice(0, 1000);
-    $("prompt").placeholder = "Ask about the selected text, e.g. \"explain this\" or \"is this a good deal?\"";
+    basePlaceholder = "Ask about the selected text, e.g. \"explain this\" or \"is this a good deal?\"";
   } else {
-    $("prompt").placeholder = "What should Docent do on this page? e.g. search for \"mechanical keyboards\" and open the first result";
+    basePlaceholder = "What should Docent do on this page? e.g. search for \"mechanical keyboards\" and open the first result";
   }
+  if (!$("runBtn").disabled) $("prompt").placeholder = basePlaceholder;
 }
 $("ctxClear").onclick = () => setPending(null);
 async function takePending() {
@@ -504,8 +511,10 @@ function render(run) {
   $("status").className = "status " + (status || "");
   $("runBtn").disabled = busy;
   $("stopBtn").hidden = !busy;
-  $("prompt").disabled = busy;
-  if (run?.goal && (busy || !$("prompt").value)) $("prompt").value = run.goal;
+  // The box stays free for the next request; the running one shows as the placeholder.
+  if (run?.goal) lastGoal = run.goal;
+  if (busy && $("prompt").value.trim() === run.goal) $("prompt").value = ""; // started by voice or a suggestion
+  $("prompt").placeholder = busy ? `Working on "${run.goal.slice(0, 60)}${run.goal.length > 60 ? "…" : ""}". Type your next request…` : basePlaceholder;
 
   $("confirm").hidden = status !== "confirm" || !run.pending;
   if (run?.pending) $("confirmText").textContent = run.pending.label;

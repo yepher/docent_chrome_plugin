@@ -57,6 +57,22 @@ const COMPOSE = "compose";
 
 let run = null; // the one active (or last) run
 
+// "Read the clipboard aloud", "summarize what I copied": the clipboard's text stands in
+// for the selection. It is only read when the request mentions it.
+const CLIPBOARD = /\b(clipboard|pasteboard)\b|\bwhat i('ve| have)?( just)? copied\b/i;
+const CLIPBOARD_CHARS = 60000;
+async function useClipboard(r) {
+  await voice.ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({ target: "offscreen", type: "clipboard:read" });
+  if (!res || res.error) throw new Error(res?.error || "Couldn't read the clipboard (the offscreen document isn't available).");
+  const text = (res.text || "").trim();
+  if (!text) throw new Error("The clipboard has no text in it.");
+  r.selection = text.slice(0, CLIPBOARD_CHARS);
+  r.source = "clipboard";
+  log("info", `Using the clipboard: ${text.length.toLocaleString()} characters.`, text.length > CLIPBOARD_CHARS ? `Long text: using the first ${CLIPBOARD_CHARS.toLocaleString()} characters.` : undefined);
+}
+const fromClipboard = (r) => r.source === "clipboard";
+
 // ---------- messaging ----------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target === "offscreen") return false; // for the offscreen document, not us
@@ -253,6 +269,18 @@ async function agentLoop(r) {
   const s = await loadSettings();
   r.settings = s;
   if (s.speakAnswers && lkConfigured(s)) r.speak = true;
+  if (CLIPBOARD.test(r.goal)) {
+    await useClipboard(r);
+    // Clear-cut wordings don't need the decision model (or a readable page).
+    const quick = lkConfigured(s) && !r.read && !r.podcast ? (QUICK_KINDS.find(([, re, needsLlm]) => needsLlm && re.test(r.goal.trim())) || [])[0] : null;
+    if (quick === "read") r.read = true;
+    if (quick === "podcast") r.podcast = true;
+    if (quick === "explain") {
+      r.kind = "explain";
+      if (WANTS_VOICE.test(r.goal)) r.speak = true;
+      return writtenAnswer(r, s);
+    }
+  }
   // A PDF in Chrome's viewer: read the file itself (pdf.js) and work from its text.
   const tab0 = await chrome.tabs.get(r.tabId);
   r.pdf = await pdfFor(tab0, (f, a) => inject(r.tabId, f, a)).catch((e) => { throw new Error(`This looks like a PDF, but ${e.message.replace(/^./, (c) => c.toLowerCase())}`); });
@@ -274,7 +302,7 @@ async function agentLoop(r) {
   let scrolls = 0;
 
   if (r.heard) log("info", `🎙 You: "${r.heard}"`);
-  log("info", `Goal: ${r.goal}`, r.selection ? `with selected text: "${r.selection.slice(0, 100)}${r.selection.length > 100 ? "…" : ""}"` : undefined);
+  log("info", `Goal: ${r.goal}`, r.selection ? `with ${fromClipboard(r) ? "clipboard" : "selected"} text: "${r.selection.slice(0, 100)}${r.selection.length > 100 ? "…" : ""}"` : undefined);
 
   // Is this a question about the page, or something to do?
   await settle(r.tabId);
@@ -623,7 +651,7 @@ async function classifyPrompt(r, ask, llm) {
     {
       user_prompt: r.goal,
       current_page: snap ? { url: snap.url, title: snap.title } : "unknown",
-      ...(r.selection ? { selected_text: r.selection.slice(0, 1000), note: "The prompt is about `selected_text`, which the user selected on the page" } : {}),
+      ...(r.selection ? { selected_text: r.selection.slice(0, 1000), note: fromClipboard(r) ? "The prompt is about `selected_text`, which is the text on the user's clipboard" : "The prompt is about `selected_text`, which the user selected on the page" } : {}),
     },
     questions
   );
@@ -803,7 +831,7 @@ async function readAloud(r, s) {
   }
   if (r.selection) {
     const tab = await chrome.tabs.get(r.tabId);
-    title = tab.title; text = r.selection; what = "the selection";
+    title = fromClipboard(r) ? "Clipboard" : tab.title; text = r.selection; what = fromClipboard(r) ? "the clipboard" : "the selection";
   } else {
     const target = await pickTarget(r, s, "read aloud");
     if (target.kind === "item") {
@@ -1004,6 +1032,7 @@ async function makePodcast(r, s) {
   let title = tab.title, text, what, cited = false, pdfPages = null;
   if (r.selection) {
     text = r.selection; what = "the selection";
+    if (fromClipboard(r)) { title = "Clipboard"; what = "the clipboard"; }
   } else if (r.pdf) {
     // A PDF: number its paragraphs [p1]… so each line can cite what it's about; while it
     // plays, the viewer turns to the page being discussed.
@@ -1078,7 +1107,7 @@ async function makePodcast(r, s) {
   log("info", `Podcast of ${what}: ${hosts[0].name} and ${hosts[1].name} will discuss it.`, expressive ? "Expressive mode: the script marks emotion, pauses and emphasis for the voices." : undefined);
   pod.play().catch((e) => log("warn", `Podcast: ${e.message}`));
   try {
-    await pod.write({ title, url: tab.url, text: text.slice(0, cited ? 32000 : 16000), goal: r.goal, signal: r.abort.signal, cited });
+    await pod.write({ title, url: fromClipboard(r) ? "" : tab.url, text: text.slice(0, cited ? 32000 : 16000), goal: r.goal, signal: r.abort.signal, cited });
   } catch (e) {
     pod.stop();
     throw e;
@@ -1103,10 +1132,12 @@ const SUGGEST = {
 };
 function staticSuggestions(r) {
   const sel = !!r.selection;
-  const make = (x) => x === "read" ? { label: sel ? "Read the selection aloud" : "Read this page aloud", goal: sel ? "Read the selected text aloud" : "Read this page aloud", mode: "read" }
+  // Clipboard runs name the clipboard in the goal, so a follow-up reads it afresh.
+  const [short, full] = fromClipboard(r) ? ["the clipboard", "the clipboard"] : ["the selection", "the selected text"];
+  const make = (x) => x === "read" ? { label: sel ? `Read ${short} aloud` : "Read this page aloud", goal: sel ? `Read ${full} aloud` : "Read this page aloud", mode: "read" }
     : x === "download" ? { label: "Download the podcast (MP3)", goal: "Download the podcast audio", mode: "download" }
-    : x === "podcast" ? { label: "Make it a podcast", goal: sel ? "Make a podcast of the selected text" : "Make a podcast of this page", mode: "podcast" }
-    : { label: sel ? x.replace("this page", "the selection") : x, goal: sel ? x.replace("this page", "the selected text") : x };
+    : x === "podcast" ? { label: "Make it a podcast", goal: sel ? `Make a podcast of ${full}` : "Make a podcast of this page", mode: "podcast" }
+    : { label: sel ? x.replace("this page", short) : x, goal: sel ? x.replace("this page", full) : x };
   const list = SUGGEST[r.kind] || SUGGEST.default;
   return list.map(make).filter((x) => x.goal.toLowerCase() !== r.goal.toLowerCase());
 }
@@ -1162,7 +1193,8 @@ chrome.commands.onCommand.addListener((cmd) => {
 async function writtenAnswer(r, llm) {
   let page;
   if (r.selection) {
-    page = { ...(await chrome.tabs.get(r.tabId)), text: r.selection.slice(0, 16000) };
+    page = fromClipboard(r) ? { title: "Clipboard", url: "", text: r.selection.slice(0, 16000) }
+      : { ...(await chrome.tabs.get(r.tabId)), text: r.selection.slice(0, 16000) };
   } else {
     const target = await pickTarget(r, r.settings || llm, "answer about");
     page = r.pdf
@@ -1172,15 +1204,15 @@ async function writtenAnswer(r, llm) {
       : await inject(r.tabId, pageText, [16000]);
   }
   const model = llm.lkModel || DEFAULT_MODEL;
-  r.answer = { text: "", note: `Written by ${model} from the ${r.selection ? "selected" : "page"} text. Not checked by ${deciderName(r.settings || llm)}.`, items: [], long: true };
+  r.answer = { text: "", note: `Written by ${model} from the ${fromClipboard(r) ? "clipboard" : r.selection ? "selected" : "page"} text. Not checked by ${deciderName(r.settings || llm)}.`, items: [], long: true };
   log("info", `Asking ${model}…`);
   let last = 0, sent = 0;
   // Spoken reply: stream sentences to TTS while the text model is still writing.
   const speaker = r.speak ? await voice.speakStream(llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
   const text = await chat(llm, [
-    { role: "system", content: "You answer questions about the web page the user is looking at, using only the page content provided. Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the page doesn't contain the answer, say so." },
+    { role: "system", content: (fromClipboard(r) ? "You answer questions about the text on the user's clipboard, using only that text." : "You answer questions about the web page the user is looking at, using only the page content provided.") + " Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the text doesn't contain the answer, say so." },
     ...(r.history?.length ? [{ role: "system", content: `Conversation so far (for context):\n${r.history.map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`).join("\n")}` }] : []),
-    { role: "user", content: `Page title: ${page.title}\nURL: ${page.url}\n\n${r.selection ? "Text the user selected on the page" : page.item ? "The post or item on the page the user means" : "Page text"}:\n${page.text}\n\nQuestion: ${r.goal}` },
+    { role: "user", content: `${fromClipboard(r) ? "" : `Page title: ${page.title}\nURL: ${page.url}\n\n`}${fromClipboard(r) ? "Text on the user's clipboard" : r.selection ? "Text the user selected on the page" : page.item ? "The post or item on the page the user means" : "Page text"}:\n${page.text}\n\nQuestion: ${r.goal}` },
   ], {
     signal: r.abort.signal,
     maxTokens: 1200,

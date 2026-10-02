@@ -157,7 +157,7 @@ export class Conversation {
   async standalone(said) {
     const convo = this.history.slice(-8).map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`).join("\n");
     const out = await chat(this.s, [
-      { role: "system", content: "You rewrite the user's latest message for a browser assistant that can read the current web page aloud, answer questions about it, and act on it. Using the conversation so far, rewrite the latest message as one standalone request with every reference resolved (which post, which item, which page). Keep it short. If it is already standalone, return it unchanged. Output only the request." },
+      { role: "system", content: "You rewrite the user's latest message for a browser assistant that can read the current web page or the clipboard aloud, answer questions about them, and act on the page. Using the conversation so far, rewrite the latest message as one standalone request with every reference resolved (which post, which item, which page, or the clipboard). Keep it short. If it is already standalone, return it unchanged. Output only the request." },
       { role: "user", content: `Conversation so far:\n${convo}\n\nLatest message: ${said}` },
     ], { maxTokens: 80 });
     const goal = out.trim().replace(/^["']|["']$/g, "");
