@@ -73,6 +73,46 @@ async function useClipboard(r) {
 }
 const fromClipboard = (r) => r.source === "clipboard";
 
+// "help" (typed or said): how to use Docent. Answered here, without a model or the page.
+const HELP = /^(please )?(help( me)?|\?+|commands|instructions|how (do|can) i use (this|it|you|docent)|what can (you|docent|this) do|how (does|do) (this|docent|you) work)[\s?.!]*$/i;
+const HELP_TEXT = `Type what you want in the box, or use the mic. Docent works on the page in the current tab.
+
+Ask about the page
+- "Is this in stock?", "How many reviews are there?", "Which posts mention pricing?", "What is the total?"
+- "Summarize this page", "Explain this article", "Summarize the post from Jane Doe"
+
+Find, hide or dim by meaning
+- "Highlight reviews that mention battery life"
+- "Hide sponsored results", "Dim posts about politics" (can be saved as a rule for the site)
+
+Listen
+- "Read this page aloud", "Read the post I'm looking at"
+- "Make this a podcast", "A 5 minute podcast of this article" (two hosts; downloadable as MP3)
+- Add "tell me" or "out loud" to have an answer spoken
+
+Do things for you
+- "Search for mechanical keyboards and open the first result"
+- "Go to example.com", "Type "hello" in the message box"
+- Docent asks before anything that buys, sends, posts or deletes
+
+Use the clipboard or a selection
+- "Read the clipboard aloud", "Summarize the clipboard", "Make a podcast of what I copied"
+- Select text, right-click, "Ask Docent about …" to ask about just that text
+
+Talk hands-free (Alt+Shift+J)
+- Say requests one after another; talk over Docent to interrupt
+- "stop", "continue", "repeat that", "goodbye"
+
+Keys: Alt+J opens Docent, Alt+Shift+P pauses or resumes speech, ■ stops.
+Settings (⚙): the decision model (Jev with a TypeSafe key, or Laya in your browser) and LiveKit for summaries, voice and podcasts.`;
+const HELP_SPOKEN = "You can ask me questions about the page, or ask me to summarize it, read it aloud, or make it a podcast. I can highlight or hide things by meaning, click and type for you, and read or summarize your clipboard. Say stop, continue or repeat that while I'm talking, and goodbye to finish. The full list is in the panel.";
+function showHelp(r, s) {
+  r.kind = "help";
+  r.answer = { text: HELP_TEXT, note: "", items: [], long: true, spoken: true };
+  if (r.speak && lkConfigured(s)) voice.speak(s, HELP_SPOKEN).catch((e) => log("warn", `Voice: ${e.message}`));
+  finish("done", "Here's how to use Docent.");
+}
+
 // ---------- messaging ----------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target === "offscreen") return false; // for the offscreen document, not us
@@ -269,6 +309,7 @@ async function agentLoop(r) {
   const s = await loadSettings();
   r.settings = s;
   if (s.speakAnswers && lkConfigured(s)) r.speak = true;
+  if (HELP.test(r.goal.trim()) && !r.read && !r.podcast) return showHelp(r, s);
   if (CLIPBOARD.test(r.goal)) {
     await useClipboard(r);
     // Clear-cut wordings don't need the decision model (or a readable page).
