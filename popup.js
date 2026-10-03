@@ -663,6 +663,7 @@ async function showUpdate() {
 }
 
 (async () => {
+  $("version").textContent = `(${chrome.runtime.getManifest().version})`;
   showUpdate();
   await loadSettings();
   const res = await send({ type: "jev:get" });
