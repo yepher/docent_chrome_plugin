@@ -46,6 +46,9 @@ label.check { display: flex; gap: 6px; align-items: center; color: var(--fg); }
 button.small { padding: 2px 8px; font-size: 11px; }
 .answer-text { font-size: 20px; font-weight: 600; margin: 2px 0; word-break: break-word; user-select: text; }
 .answer-note { color: var(--muted); font-size: 12px; }
+.cite { all: unset; cursor: pointer; margin-left: 3px; padding: 0 5px; border-radius: 8px; font-size: 10.5px; font-weight: 600; line-height: 1.5; vertical-align: 1px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.cite:hover, .cite.on { color: var(--accent-fg); background: var(--accent); }
+.cite:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .answer-note:empty { display: none; }
 .answer-items { margin: 6px 0 0; padding-left: 22px; max-height: 160px; overflow-y: auto; user-select: text; }
 .answer-items:empty { display: none; }

@@ -63,6 +63,21 @@ export function pdfText(doc, maxChars, from = 0, to = doc.paras.length) {
   return out.slice(0, maxChars).trim();
 }
 
+// Paragraphs [from, to) numbered [p1], [p2]… so a podcast line or an answer can cite them.
+// pages maps each id to its page, for turning the viewer to it.
+export function pdfNumbered(doc, maxChars, from = 0, to = doc.paras.length) {
+  const lines = [], pages = {};
+  let chars = 0;
+  for (let i = from; i < to && chars < maxChars; i++) {
+    const p = doc.paras[i], id = `p${i + 1}`;
+    pages[id] = p.page;
+    const line = `[${id}] ${p.heading ? "## " : ""}${p.text}`;
+    lines.push(line);
+    chars += line.length;
+  }
+  return { text: lines.join("\n"), pages, count: lines.length };
+}
+
 // Reading chunks of about maxChars, each tagged with the page it starts on.
 export function pdfChunks(doc, maxChars, from = 0, to = endOfBody(doc)) {
   const chunks = [];

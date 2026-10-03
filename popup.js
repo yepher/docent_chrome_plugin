@@ -228,11 +228,57 @@ $("prompt").addEventListener("keydown", (e) => {
 $("stopBtn").onclick = () => send({ type: "jev:stop" }).then((r) => render(r.run));
 $("copyBtn").onclick = async () => {
   const items = [...$("answerItems").children].map((li, i) => `${i + 1}. ${li.textContent}`);
-  const text = [$("answerText").textContent, $("answerNote").textContent, ...items].filter(Boolean).join("\n");
+  const text = [lastRun?.answer?.text ?? $("answerText").textContent, $("answerNote").textContent, ...items].filter(Boolean).join("\n");
   await navigator.clipboard.writeText(text).catch(() => {});
   $("copyBtn").textContent = "Copied";
   setTimeout(() => ($("copyBtn").textContent = "Copy"), 1200);
 };
+// ---------- answers: citations ----------
+// A written answer marks where each sentence came from ("… [p14]"). The markers are shown
+// as small links: a number for a part of the page, a page for a PDF, a time for a video.
+// A range ("[t1-t3]") is one link: it starts at the first block and, on a page, highlights them all.
+const CITE = /\s*\[((?:[pmt]\d+(?:\s*[-–]\s*[pmt]?\d+)?)(?:\s*,\s*[pmt]\d+(?:\s*[-–]\s*[pmt]?\d+)?)*)\]/gi;
+function citeIds(item) {
+  const m = /^([pmt])(\d+)(?:\s*[-–]\s*[pmt]?(\d+))?$/.exec(item.trim());
+  if (!m) return [];
+  const from = Number(m[2]), to = Math.min(Math.max(from, Number(m[3] || from)), from + 40);
+  return Array.from({ length: to - from + 1 }, (_, i) => `${m[1]}${from + i}`);
+}
+let activeCite = null;
+function renderCited(box, ans) {
+  const frag = document.createDocumentFragment();
+  const numbers = new Map();
+  let last = 0;
+  for (const m of ans.cited.matchAll(CITE)) {
+    frag.append(ans.cited.slice(last, m.index));
+    last = m.index + m[0].length;
+    for (const item of m[1].toLowerCase().split(/\s*,\s*/)) {
+      const ids = citeIds(item), id = ids[0];
+      if (!id) continue;
+      if (!numbers.has(id)) numbers.set(id, numbers.size + 1);
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "cite" + (id === activeCite ? " on" : "");
+      b.dataset.id = id;
+      b.textContent = ans.refs?.[id] || String(numbers.get(id));
+      b.title = id[0] === "t" ? "Jump the video to here" : ans.refs?.[id] ? "Turn the PDF to this page" : "Show this on the page";
+      b.onclick = () => showCite(ids);
+      frag.append(b);
+    }
+  }
+  frag.append(ans.cited.slice(last));
+  box.replaceChildren(frag);
+}
+async function showCite(ids) {
+  const id = ids[0];
+  // Clicking the highlighted one again clears it; a time in a video always jumps there.
+  const off = id === activeCite && id[0] !== "t";
+  activeCite = off ? null : id;
+  for (const b of $("answerText").querySelectorAll(".cite")) b.classList.toggle("on", b.dataset.id === activeCite);
+  const res = await send({ type: "jev:cite", ids: off ? null : ids });
+  if (!off && !res?.ok) $("answerNote").textContent = id[0] === "t" ? "Couldn't find the video on the page any more." : "That part isn't on the page any more.";
+}
+
 // ---------- answers: jump to items, undo, save as rule ----------
 function focusItem(it) {
   if (lastRun?.tabId != null && it?.ref) send({ type: "jev:focus", tabId: lastRun.tabId, ref: it.ref });
@@ -526,7 +572,8 @@ function render(run) {
     $("answerLabel").textContent = ans.podcast ? "Podcast" : ans.reading ? "Reading" : "Answer";
     const box = $("answerText");
     const follow = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
-    box.textContent = ans.text;
+    if (status === "running") activeCite = null;
+    if (ans.cited) renderCited(box, ans); else box.textContent = ans.text;
     // Podcast transcript: keep the line being spoken in view.
     if (ans.podcast) {
       const at = ans.text.indexOf("▶ ");
@@ -574,7 +621,7 @@ function render(run) {
       const tab = await activeTab();
       if (!tab) return;
       $("prompt").value = sg.goal;
-      const res = await send({ type: "jev:followup", index: i, tabId: tab.id });
+      const res = await send({ type: "jev:followup", index: i, suggestion: sg, tabId: tab.id });
       if (res?.error) voiceBar("error", res.error); else render(res.run);
     };
     return b;

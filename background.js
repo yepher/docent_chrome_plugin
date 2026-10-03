@@ -16,11 +16,13 @@ import { Podcast, hostsFor } from "./podcast.js";
 import { supportsExpressive, strip as stripExpr } from "./expressive.js";
 import { prepareReadAlong, highlightSentence, clearReadAlong, nextReadingChunk, loadMoreBelow } from "./karaoke.js";
 import { podcastSource, showPodcastRefs, clearPodcastRefs } from "./podsource.js";
-import { pdfFor, pdfText, pdfChunks, endOfBody, bodyStart, goToPage } from "./pdfdoc.js";
+import { pdfFor, pdfText, pdfChunks, pdfNumbered, endOfBody, bodyStart, goToPage } from "./pdfdoc.js";
 import { chat, lkConfigured, DEFAULT_MODEL } from "./lk.js";
 import { focusRef, clearMarks, getSelectionText } from "./items.js";
 import { pickTarget as pickTargetFromOutline } from "./targets.js";
 import { pageSkeleton, applyEdits, undoEdits } from "./restyle.js";
+import { languageIn, uiLanguage, translateLines, collectTexts, applyTexts, pageLanguage } from "./translate.js";
+import { videoTranscript, seekVideo } from "./video.js";
 import { modeFor, runFilter, applyRules, reapplyRules, getRules, saveRule, updateRule, deleteRule, forgetTab } from "./rules.js";
 
 export const DEFAULTS = {
@@ -81,6 +83,11 @@ const HELP_TEXT = `Type what you want in the box, or use the mic. Docent works o
 Ask about the page
 - "Is this in stock?", "How many reviews are there?", "Which posts mention pricing?", "What is the total?"
 - "Summarize this page", "Explain this article", "Summarize the post from Jane Doe"
+- Click a number in a written answer to see the part of the page it came from
+
+Videos (YouTube, or any video with captions)
+- "Summarize this video", "What does she say about pricing?"
+- Click a time in the answer to jump the video there
 
 Find, hide or dim by meaning
 - "Highlight reviews that mention battery life"
@@ -94,6 +101,10 @@ Listen
 Change the page
 - "Change the page background to red", "Make the text bigger", "Make this page dark"
 - "Replace every "colour" with "color"", then "Undo page changes" to put it back
+
+Translate
+- "Translate this page into Spanish" rewrites the page; "Undo page changes" puts it back
+- "Read this page aloud in French", "Summarize this page in German"
 
 Do things for you
 - "Search for mechanical keyboards and open the first result"
@@ -132,10 +143,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "jev:followup": {
         // A clicked suggestion: stop whatever is being read out, then run it.
         if (run?.status === "running" || run?.status === "confirm") return { error: "A task is already running." };
-        const sg = (run?.suggestions || [])[msg.index];
-        if (!sg) return { error: "That suggestion is gone." };
-        if (sg.mode === "download") { downloadPodcast(); return publicRun(); }
-        const keepSel = run.tabId === msg.tabId ? run.selection || "" : "";
+        // The popup sends the suggestion itself: the service worker may have restarted
+        // (Chrome stops it when idle) and forgotten the run the chip belongs to.
+        const sg = msg.suggestion || (run?.suggestions || [])[msg.index];
+        if (!sg?.goal) return { error: "That suggestion is gone." };
+        if (sg.mode === "download") {
+          if (!lastPodcast) return { error: "That podcast is no longer in memory. Make it again to download it." };
+          downloadPodcast();
+          return publicRun();
+        }
+        const keepSel = run?.tabId === msg.tabId ? run.selection || "" : "";
         stopReadingOut();
         await voice.stopSpeaking();
         startRun(sg.goal, msg.tabId, keepSel, { read: sg.mode === "read", podcast: sg.mode === "podcast" });
@@ -216,6 +233,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         if (msg.kind === "tts-error" && run && run.status === "done") log("warn", `Voice: ${msg.message}`);
         return { ok: true };
+      case "jev:cite":
+        return { ok: await showCitation(msg.ids) };
       case "jev:focus":
         return { ok: await inject(msg.tabId, focusRef, [msg.ref.attr, msg.ref.val]).catch(() => false) };
       case "jev:clearMarks":
@@ -331,6 +350,8 @@ async function agentLoop(r) {
   // A PDF in Chrome's viewer: read the file itself (pdf.js) and work from its text.
   const tab0 = await chrome.tabs.get(r.tabId);
   r.pdf = await pdfFor(tab0, (f, a) => inject(r.tabId, f, a)).catch((e) => { throw new Error(`This looks like a PDF, but ${e.message.replace(/^./, (c) => c.toLowerCase())}`); });
+  r.url = tab0.url || "";
+  if (TRANSLATE_PAGE.test(r.goal.trim()) && !TRANSLATE_PART.test(r.goal) && !r.selection && !r.pdf && !r.read && !r.podcast) return translatePage(r, s);
   if (r.pdf) log("info", `PDF: "${r.pdf.title.slice(0, 80)}", ${r.pdf.numPages} page${r.pdf.numPages === 1 ? "" : "s"}, ${r.pdf.paras.length} paragraphs.`, r.pdf.pagesRead < r.pdf.numPages ? `Read the first ${r.pdf.pagesRead} pages.` : "Read with pdf.js.");
   if (r.read) {
     if (!lkConfigured(s)) throw new Error("Reading aloud uses LiveKit Inference TTS. Add your LiveKit URL, key and secret in Settings.");
@@ -690,6 +711,10 @@ function onLayaProgress(msg) {
 }
 
 async function classifyPrompt(r, ask, llm) {
+  if (llm && aboutVideo(r)) {
+    log("info", "Understood as: explain", "a question about the video");
+    return "explain";
+  }
   if (llm && !r.selection && CHANGE_QUICK.test(r.goal.trim()) && !CHANGE_NOT.test(r.goal)) {
     log("info", "Understood as: change", "from the wording");
     return "change";
@@ -900,6 +925,49 @@ async function undoChanges(r) {
   finish("done", "Undone.");
 }
 
+// ---------- translate the page in place (translate.js) ----------
+const TRANSLATE_PAGE = /^(please )?(can you |could you )?translate\b/i;
+// A named part of the page is answered in the Answer card instead ("translate the first comment").
+const TRANSLATE_PART = /\b(post|comment|paragraph|heading|headline|title|sentence|word|phrase|section|quote|caption|review|message|tweet|selection|selected|clipboard)\b/i;
+const TRANSLATE_CHARS = 60000;
+
+async function translatePage(r, s) {
+  r.kind = "translate";
+  if (!lkConfigured(s)) return finish("stopped", "Translating a page needs a text model to write the translation. Add your LiveKit URL, key and secret in Settings.");
+  const lang = languageIn(r.goal, true) || uiLanguage();
+  log("info", `Goal: ${r.goal}`);
+  let src;
+  try {
+    src = await inject(r.tabId, collectTexts, [TRANSLATE_CHARS]);
+  } catch (e) {
+    throw new Error(`Can't translate this page (${e.message}). Chrome blocks extensions on chrome:// pages, the Web Store and some viewers.`);
+  }
+  const total = src?.texts?.length || 0;
+  if (!total) return finish("stopped", "Couldn't find text on this page to translate.");
+  const model = s.lkModel || DEFAULT_MODEL;
+  log("info", `Translating ${total.toLocaleString()} pieces of text into ${lang.name} with ${model}…`, src.more ? `Long page: translating the first ${TRANSLATE_CHARS.toLocaleString()} characters.` : undefined);
+  const entry = r.log.at(-1);
+  let done = 0, changed = 0;
+  await translateLines(s, src.texts, lang.name, {
+    signal: r.abort.signal,
+    onBatch: async (pairs) => {
+      changed += (await inject(r.tabId, applyTexts, [pairs]).catch(() => 0)) || 0;
+      done += pairs.length;
+      entry.text = `Translating into ${lang.name} with ${model}: ${done.toLocaleString()} of ${total.toLocaleString()} pieces of text…`;
+      publish();
+    },
+  });
+  entry.text = `Translated ${done.toLocaleString()} of ${total.toLocaleString()} pieces of text into ${lang.name} with ${model}.`;
+  if (!changed) return finish("stopped", done ? `The page already reads as ${lang.name}: nothing changed.` : "The text model didn't return a translation.");
+  r.answer = {
+    text: `Translated into ${lang.name}`,
+    note: `${changed.toLocaleString()} piece${changed === 1 ? "" : "s"} of text changed, written by ${model}${src.more ? " (the first part of a long page)" : ""}. Only this tab is changed, until it reloads. "Undo page changes" puts it back.`,
+    items: [],
+  };
+  log("answer", r.answer.text, r.answer.note);
+  finish("done", "Page translated.");
+}
+
 // Pause the run until you allow or cancel in the popup.
 async function askUser(r, label) {
   r.status = "confirm";
@@ -931,9 +999,23 @@ async function filterAnswer(r, s, kind) {
 }
 
 // ---------- read aloud (LiveKit Inference TTS) ----------
+// "Read this page aloud in Spanish": each part is translated just before it is spoken.
+// Returns { name, code } or null (also when the page is already in that language).
+async function readingLanguage(r) {
+  const lang = languageIn(r.goal);
+  if (!lang) return null;
+  const pageLang = r.selection || r.pdf ? "" : await inject(r.tabId, pageLanguage, []).catch(() => "");
+  if (pageLang && lang.code && pageLang.toLowerCase().split("-")[0] === lang.code) return null;
+  log("info", `Translating into ${lang.name} as it reads.`, "The words spoken aren't the ones on the page, so there's no read-along highlight. How natural it sounds depends on the voice chosen in Settings.");
+  return lang;
+}
+
 async function readAloud(r, s) {
   let title, text, truncated = false, what;
   if (podcast) { podcast.stop(); podcast = null; }
+  const lang = await readingLanguage(r);
+  const inLang = lang ? ` · in ${lang.name}` : "";
+  if (lang) s = { ...s, ttsLang: lang.code };
   if (r.pdf && !r.selection) {
     // A PDF: read a located section, or the whole document up to the references,
     // turning the viewer to each page as it goes.
@@ -948,8 +1030,8 @@ async function readAloud(r, s) {
     const minutes = Math.max(1, Math.round(words / 160));
     const what = target.kind === "item" ? `"${target.first.slice(0, 60)}"` : `"${doc.title.slice(0, 60)}"`;
     log("info", `Reading ${what} aloud from page ${chunks[0].page}: ${words.toLocaleString()} words, about ${minutes} min.`, target.kind === "item" ? undefined : `${from > 0 ? "Skips the author list; " : ""}stops before the references.`);
-    startPdfReader(r.tabId, s, doc, chunks);
-    r.answer = { text: "Reading aloud", note: `${doc.title} · about ${minutes} min · the PDF follows along · press ■ to stop`, items: [], spoken: true, reading: true };
+    startPdfReader(r.tabId, s, doc, chunks, lang);
+    r.answer = { text: "Reading aloud", note: `${doc.title}${inLang} · about ${minutes} min · the PDF follows along · press ■ to stop`, items: [], spoken: true, reading: true };
     return finish("done", "Reading the PDF aloud.");
   }
   if (r.selection) {
@@ -963,9 +1045,9 @@ async function readAloud(r, s) {
       // The whole page: read progressively, a chunk at a time, scrolling down (and
       // letting feeds load more) until the end of the page or until you say stop.
       const tab = await chrome.tabs.get(r.tabId);
-      const ok = await startPageReader(r.tabId, s, tab.title);
+      const ok = await startPageReader(r.tabId, s, tab.title, lang);
       if (!ok) return finish("stopped", "Couldn't find readable text on this page.");
-      r.answer = { text: "Reading aloud", note: `${tab.title} · reading down the page until the end · press ■ to stop`, items: [], spoken: true, reading: true };
+      r.answer = { text: "Reading aloud", note: `${tab.title}${inLang} · reading down the page until the end · press ■ to stop`, items: [], spoken: true, reading: true };
       return finish("done", "Reading the page aloud, scrolling as it goes.");
     }
   }
@@ -973,10 +1055,12 @@ async function readAloud(r, s) {
   const minutes = Math.max(1, Math.round(words / 160));
   log("info", `Reading ${what} aloud: ${words.toLocaleString()} words, about ${minutes} min.`, truncated ? "Long page: reading the first 60,000 characters." : undefined);
   // Sentence by sentence, so the page can highlight the one being spoken.
-  const list = text.split(/\n+/).flatMap((line) => voice.sentences(line)).filter((x) => x.trim());
-  await startReadAlong(r.tabId, list, 0, s);
+  let lines = text.split(/\n+/).filter((x) => x.trim());
+  if (lang) lines = await translateLines(s, lines, lang.name, { signal: r.abort.signal });
+  const list = lines.flatMap((line) => voice.sentences(line)).filter((x) => x.trim());
+  await startReadAlong(r.tabId, list, 0, s, { plain: !!lang });
   r.readText = text;
-  r.answer = { text: "Reading aloud", note: `${title} · about ${minutes} min · press ■ to stop`, items: [], spoken: true, reading: true };
+  r.answer = { text: "Reading aloud", note: `${title}${inLang} · about ${minutes} min · press ■ to stop`, items: [], spoken: true, reading: true };
   finish("done", "Reading aloud.");
 }
 
@@ -996,12 +1080,12 @@ let readAlong = null; // { tabId, list, lastSeg, highlighted }
 async function startReadAlong(tabId, list, from, s, opts = {}) {
   if (opts.plain) {
     // PDFs: Chrome's viewer can't be highlighted; just track the sentence for "continue".
-    readAlong = { tabId, list, lastSeg: from, highlighted: false, plain: true };
+    readAlong = { tabId, list, lastSeg: from, highlighted: false, plain: true, s };
     await voice.speakSentences(s, list.slice(from), from);
     return;
   }
   const prep = await inject(tabId, prepareReadAlong, [list]).catch(() => null);
-  readAlong = { tabId, list, lastSeg: from, highlighted: !!prep?.found };
+  readAlong = { tabId, list, lastSeg: from, highlighted: !!prep?.found, s };
   if (run && prep && from === 0 && !(reader && reader.chunks > 1)) log("info", prep.found ? `Read-along: following ${prep.found} of ${prep.total} sentences on the page.` : "Read-along: couldn't match the text on the page, so no highlight.");
   await voice.speakSentences(s, list.slice(from), from);
 }
@@ -1013,10 +1097,10 @@ async function startReadAlong(tabId, list, from, s, opts = {}) {
 let reader = null; // { tabId, s, waiting: resolve fn, stopped, chunks }
 const READ_CHUNK_CHARS = 1600;
 
-async function startPageReader(tabId, s, title) {
+async function startPageReader(tabId, s, title, lang) {
   stopReadingOut();
   const me = {
-    tabId, s, stopped: false, chunks: 0,
+    tabId, s, stopped: false, chunks: 0, lang, plain: !!lang,
     nextChunk: () => inject(tabId, nextReadingChunk, [READ_CHUNK_CHARS, false]).catch(() => null),
     loadMore: () => inject(tabId, loadMoreBelow, []).catch(() => false),
   };
@@ -1029,11 +1113,11 @@ async function startPageReader(tabId, s, title) {
 }
 
 // A PDF: read prepared chunks in order, turning Chrome's viewer to each chunk's page.
-function startPdfReader(tabId, s, doc, chunks) {
+function startPdfReader(tabId, s, doc, chunks, lang) {
   stopReadingOut();
   let i = 0;
   const me = {
-    tabId, s, stopped: false, chunks: 0, plain: true,
+    tabId, s, stopped: false, chunks: 0, plain: true, lang,
     nextChunk: async () => chunks[i++] || null,
     loadMore: async () => false,
     onChunk: (c) => { if (c.page && c.page !== me.page) { me.page = c.page; goToPage(tabId, doc, c.page); } },
@@ -1056,7 +1140,12 @@ async function readerLoop(me, chunk) {
     dry = 0;
     me.chunks++;
     me.onChunk?.(chunk);
-    const list = chunk.lines.flatMap((line) => voice.sentences(line)).filter((x) => x.trim());
+    let lines = chunk.lines;
+    if (me.lang) {
+      lines = await translateLines(me.s, lines, me.lang.name).catch((e) => { if (run) log("warn", `Couldn't translate this part (${e.message}); reading it as written.`); return lines; });
+      if (me.stopped || reader !== me) break;
+    }
+    const list = lines.flatMap((line) => voice.sentences(line)).filter((x) => x.trim());
     const done = waitForReadingDone(me);
     await startReadAlong(me.tabId, list, 0, me.s, { plain: me.plain });
     const reason = await done;
@@ -1098,7 +1187,7 @@ async function continueReading() {
     (async () => {
       if (readAlong.lastSeg < readAlong.list.length - 1) {
         const done = waitForReadingDone(me);
-        await startReadAlong(me.tabId, readAlong.list, Math.max(0, readAlong.lastSeg), s, { plain: me.plain });
+        await startReadAlong(me.tabId, readAlong.list, Math.max(0, readAlong.lastSeg), me.s, { plain: me.plain });
         if ((await done) !== "finished") { me.paused = true; return; }
       }
       const next = await me.nextChunk();
@@ -1107,7 +1196,7 @@ async function continueReading() {
     return true;
   }
   if (!readAlong || readAlong.lastSeg >= readAlong.list.length - 1) return false;
-  await startReadAlong(readAlong.tabId, readAlong.list, Math.max(0, readAlong.lastSeg), s, { plain: readAlong.plain });
+  await startReadAlong(readAlong.tabId, readAlong.list, Math.max(0, readAlong.lastSeg), readAlong.s || s, { plain: readAlong.plain });
   return true;
 }
 
@@ -1164,19 +1253,11 @@ async function makePodcast(r, s) {
     const target = await pickTarget(r, s, "turn into a podcast");
     const [from, to] = target.kind === "item" && target.range ? target.range : [0, endOfBody(doc)];
     what = target.kind === "item" ? `"${target.first.slice(0, 60)}"` : `"${doc.title.slice(0, 60)}"`;
-    const lines = [];
-    pdfPages = {};
-    let chars = 0;
-    for (let i = from; i < to && chars < 32000; i++) {
-      const p = doc.paras[i], id = `p${i + 1}`;
-      pdfPages[id] = p.page;
-      const line = `[${id}] ${p.heading ? "## " : ""}${p.text}`;
-      lines.push(line);
-      chars += line.length;
-    }
-    text = lines.join("\n");
+    const src = pdfNumbered(doc, 32000, from, to);
+    pdfPages = src.pages;
+    text = src.text;
     cited = true;
-    log("info", `Numbered ${lines.length} paragraphs of the PDF so the hosts can point at them; the viewer will follow along.`);
+    log("info", `Numbered ${src.count} paragraphs of the PDF so the hosts can point at them; the viewer will follow along.`);
   } else {
     const target = await pickTarget(r, s, "turn into a podcast");
     what = target.kind === "item" ? `"${target.first.slice(0, 60)}"` : "the page";
@@ -1252,6 +1333,7 @@ const SUGGEST = {
   explain: ["podcast", "read", "What are the key takeaways?"],
   task: ["Summarize this page", "What can I do on this page?"],
   change: ["Undo page changes", "Summarize this page", "read"],
+  translate: ["Undo page changes", "Summarize this page", "podcast"],
   default: ["Summarize this page", "podcast", "read"],
 };
 function staticSuggestions(r) {
@@ -1314,40 +1396,145 @@ chrome.commands.onCommand.addListener((cmd) => {
 });
 
 // ---------- text model (LiveKit Inference) ----------
+// Written answers cite their source: the text given to the model is split into numbered
+// blocks ([p12] text, [m3] image, [t40] a moment in a video), the model ends each sentence
+// with the ids it rests on, and the Answer card shows them as links (see showCitation).
+// Models also write ranges ("[t1-t3]", "[p4–p6, p9]"); a range counts as its first block onwards.
+const CITE = /\s*\[(?:[pmt]\d+(?:\s*[-–]\s*[pmt]?\d+)?)(?:\s*,\s*[pmt]\d+(?:\s*[-–]\s*[pmt]?\d+)?)*\]/gi;
+const CITE_PARTIAL = /\s*\[[pmt\d,\s–-]*$/i; // a marker still being written
+const stripCites = (t) => t.replace(CITE, "").replace(CITE_PARTIAL, "");
+const citedIds = (t) => [...new Set((t.match(CITE) || []).join(" ").toLowerCase().match(/[pmt]\d+/g) || [])];
+const clock = (sec) => {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = String(Math.floor(sec % 60)).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${x}` : `${m}:${x}`;
+};
+
+// Is the request a question about the video on the page (rather than the page around it)?
+const VIDEO_SITE = /^https?:\/\/((www|m|music)\.)?youtube\.com\/(watch|shorts|live)|^https?:\/\/youtu\.be\//i;
+const VIDEO_WORDS = /\b(video|transcript|captions?|subtitles?|talk|lecture|episode|speaker|presenter|interview)\b/i;
+const VIDEO_NOT = /\b(comments?|description|channel|subscribers?|views|likes|sidebar|recommended|playlist)\b/i;
+const VIDEO_ASK = /\?\s*$|^(please )?(what|who|when|where|why|how|which|is|are|does|do|did|summari[sz]e|explain|describe|tl;?dr|give me|list|tell me)\b/i;
+const aboutVideo = (r) => !r.selection && !r.pdf && VIDEO_ASK.test(r.goal.trim())
+  && (VIDEO_WORDS.test(r.goal) || (VIDEO_SITE.test(r.url || "") && !VIDEO_NOT.test(r.goal)));
+const VIDEO_CHARS = 100000; // about an hour and three quarters of speech
+
+// The video's captions as numbered, timed blocks, or null if there are none to use.
+async function videoSource(r) {
+  const v = await inject(r.tabId, videoTranscript, [navigator.language || "en"], "MAIN").catch((e) => ({ error: e.message }));
+  if (!v) return null;
+  if (v.error || !v.blocks?.length) {
+    log("warn", `Couldn't use the video's captions (${v.error || "there are none"}). Answering from the page text instead.`);
+    return null;
+  }
+  const lines = [], times = {};
+  let chars = 0;
+  for (const [i, b] of v.blocks.entries()) {
+    const line = `[t${i + 1}] (${clock(b.t)}) ${b.text}`;
+    if (chars + line.length > VIDEO_CHARS) break;
+    times[`t${i + 1}`] = b.t;
+    lines.push(line);
+    chars += line.length;
+  }
+  const cut = lines.length < v.blocks.length;
+  log("info", `Video: "${v.title.slice(0, 80)}"${v.duration ? `, ${clock(v.duration)}` : ""}. Using its ${v.auto ? "auto-generated " : ""}${v.langName} captions.`,
+    cut ? `Long video: using the first ${clock(v.blocks[lines.length].t)}.` : undefined);
+  return { title: v.title, author: v.author, text: lines.join("\n"), times };
+}
+
+// A citation clicked in the Answer card: show that part of the page, turn the PDF to its
+// page, or jump the video to that moment. id null clears the highlight.
+// What the links point at is kept in session storage, so they still work after Chrome has
+// stopped and restarted the service worker. ids: the blocks of one link (several for a range).
+async function showCitation(ids) {
+  const id = ids?.[0];
+  const { docentCite: c } = await chrome.storage.session.get("docentCite");
+  if (!c) return false;
+  if (c.type === "video") return id != null && c.times[id] != null && !!(await inject(c.tabId, seekVideo, [c.times[id]]).catch(() => false));
+  if (c.type === "pdf") { if (!c.pages[id]) return false; await goToPage(c.tabId, { url: c.url }, c.pages[id]); return true; }
+  if (id == null) return !!(await inject(c.tabId, clearPodcastRefs, []).catch(() => false));
+  return !!(await inject(c.tabId, showPodcastRefs, [ids]).catch(() => 0));
+}
+
 async function writtenAnswer(r, llm) {
-  let page;
+  let page, cite = null, source = "page text";
   if (r.selection) {
     page = fromClipboard(r) ? { title: "Clipboard", url: "", text: r.selection.slice(0, 16000) }
       : { ...(await chrome.tabs.get(r.tabId)), text: r.selection.slice(0, 16000) };
+    source = fromClipboard(r) ? "clipboard text" : "selected text";
   } else {
-    const target = await pickTarget(r, r.settings || llm, "answer about");
-    page = r.pdf
-      ? { title: r.pdf.title, url: r.pdf.url, text: target.kind === "item" ? target.text.slice(0, 48000) : pdfText(r.pdf, 48000), item: target.kind === "item" }
-      : target.kind === "item"
-      ? { ...(await chrome.tabs.get(r.tabId)), text: target.text.slice(0, 16000), item: true }
-      : await inject(r.tabId, pageText, [16000]);
+    const video = aboutVideo(r) ? await videoSource(r) : null;
+    if (video) {
+      page = { title: video.title, url: r.url, text: video.text, author: video.author };
+      cite = { type: "video", times: video.times };
+      source = "video's captions";
+    } else {
+      const target = await pickTarget(r, r.settings || llm, "answer about");
+      const item = target.kind === "item";
+      if (r.pdf) {
+        const [from, to] = item && target.range ? target.range : [0, r.pdf.paras.length];
+        const src = pdfNumbered(r.pdf, 48000, from, to);
+        page = { title: r.pdf.title, url: r.pdf.url, text: src.text, item };
+        cite = { type: "pdf", pages: src.pages };
+        source = "PDF's text";
+      } else {
+        // Number the blocks (the located part, or the whole page) so the answer can cite them.
+        const src = await inject(r.tabId, podcastSource, [target.start || null, target.end || null, 16000, !item]).catch(() => null);
+        if (src?.blocks >= 2) {
+          page = { ...(await chrome.tabs.get(r.tabId)), text: src.text, item };
+          cite = { type: "dom" };
+        } else {
+          page = item ? { ...(await chrome.tabs.get(r.tabId)), text: target.text.slice(0, 16000), item: true } : await inject(r.tabId, pageText, [16000]);
+        }
+      }
+    }
   }
+  if (cite) await chrome.storage.session.set({ docentCite: { ...cite, tabId: r.tabId, url: r.pdf?.url || "" } });
+  else await chrome.storage.session.remove("docentCite");
   const model = llm.lkModel || DEFAULT_MODEL;
-  r.answer = { text: "", note: `Written by ${model} from the ${fromClipboard(r) ? "clipboard" : r.selection ? "selected" : "page"} text. Not checked by ${deciderName(r.settings || llm)}.`, items: [], long: true };
+  const noteFor = (cited) => `Written by ${model} from the ${source}. Not checked by ${deciderName(r.settings || llm)}.`
+    + (!cited ? "" : cite.type === "video" ? " Click a time to jump the video there." : cite.type === "pdf" ? " Click a page number to turn the PDF to it." : " Click a number to see that part of the page.");
+  r.answer = { text: "", note: noteFor(false), items: [], long: true };
   log("info", `Asking ${model}…`);
+  // What each citation is shown as: a time in the video or a page of the PDF (page blocks are just numbered).
+  const refsFor = (t) => cite.type === "dom" ? undefined
+    : Object.fromEntries(citedIds(t).filter((id) => (cite.times || cite.pages)[id] != null).map((id) => [id, cite.type === "video" ? clock(cite.times[id]) : `p. ${cite.pages[id]}`]));
+  const show = (t, final) => {
+    if (!cite) { r.answer.text = final ? t.trim() : t; return t; }
+    const clean = stripCites(t);
+    r.answer.text = final ? clean.trim() : clean;
+    r.answer.cited = citedIds(t).length ? t.replace(CITE_PARTIAL, "") : undefined;
+    r.answer.refs = r.answer.cited ? refsFor(t) : undefined;
+    r.answer.note = noteFor(!!r.answer.cited);
+    return final ? clean : clean.trimEnd(); // what can be spoken so far: nothing that a marker may still follow
+  };
   let last = 0, sent = 0;
   // Spoken reply: stream sentences to TTS while the text model is still writing.
-  const speaker = r.speak ? await voice.speakStream(llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
+  const lang = r.speak ? languageIn(r.goal) : null;
+  const speaker = r.speak ? await voice.speakStream(lang ? { ...llm, ttsLang: lang.code } : llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
+  const subject = fromClipboard(r) ? "the text on the user's clipboard, using only that text"
+    : cite?.type === "video" ? "the video the user is watching, using only its transcript"
+    : "the web page the user is looking at, using only the page content provided";
+  const citing = !cite ? ""
+    : cite.type === "video" ? " The transcript is split into numbered blocks such as [t12], each starting with its time in the video. End each sentence or bullet with the id of the block where that is said, in square brackets, e.g. \"She recommends starting small [t12].\" Use single ids exactly as given, never a range like [t3-t7]: when something runs over several blocks, cite the one where it starts. At most two ids per sentence, and don't write times yourself."
+    : ` The text is split into numbered blocks such as [p12]${cite.type === "dom" ? ", with images and charts as [m3]" : ""}. End each sentence or bullet with the ids of the blocks it is based on, in square brackets, e.g. \"Sales doubled in a year [p14].\" Use single ids exactly as given, never a range like [p3-p7], at most three per sentence, and never mention them otherwise.`;
+  const label = fromClipboard(r) ? "Text on the user's clipboard" : r.selection ? "Text the user selected on the page"
+    : cite?.type === "video" ? "Transcript" : page.item ? "The post or item on the page the user means" : "Page text";
   const text = await chat(llm, [
-    { role: "system", content: (fromClipboard(r) ? "You answer questions about the text on the user's clipboard, using only that text." : "You answer questions about the web page the user is looking at, using only the page content provided.") + " Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the text doesn't contain the answer, say so." },
+    { role: "system", content: `You answer questions about ${subject}. Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the text doesn't contain the answer, say so.${citing}` },
     ...(r.history?.length ? [{ role: "system", content: `Conversation so far (for context):\n${r.history.map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`).join("\n")}` }] : []),
-    { role: "user", content: `${fromClipboard(r) ? "" : `Page title: ${page.title}\nURL: ${page.url}\n\n`}${fromClipboard(r) ? "Text on the user's clipboard" : r.selection ? "Text the user selected on the page" : page.item ? "The post or item on the page the user means" : "Page text"}:\n${page.text}\n\nQuestion: ${r.goal}` },
+    { role: "user", content: `${fromClipboard(r) ? "" : `${cite?.type === "video" ? "Video" : "Page"} title: ${page.title}\n${page.author ? `Channel: ${page.author}\n` : ""}URL: ${page.url}\n\n`}${label}:\n${page.text}\n\nQuestion: ${r.goal}` },
   ], {
     signal: r.abort.signal,
-    maxTokens: 1200,
+    maxTokens: cite ? 1500 : 1200,
     onDelta: (t) => {
-      r.answer.text = t;
-      if (speaker) { speaker.push(t.slice(sent)); sent = t.length; }
+      const say = show(t, false);
+      if (speaker) { speaker.push(say.slice(sent)); sent = say.length; }
       if (Date.now() - last > 150) { last = Date.now(); publish(); }
     },
   });
-  r.answer.text = text.trim() || "(the model returned nothing)";
-  if (speaker) { speaker.push(text.slice(sent)); speaker.end(); r.answer.spoken = true; }
+  const say = show(text, true);
+  if (!r.answer.text) r.answer.text = "(the model returned nothing)";
+  if (speaker) { speaker.push(say.slice(sent)); speaker.end(); r.answer.spoken = true; }
   log("answer", r.answer.text.length > 140 ? r.answer.text.slice(0, 137) + "…" : r.answer.text, r.answer.note);
   finish("done", "Answered.");
 }
@@ -1411,8 +1598,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
 chrome.tabs.onRemoved.addListener((tabId) => forgetTab(tabId));
 
 // ---------- helpers ----------
-async function inject(tabId, func, args) {
-  const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+async function inject(tabId, func, args, world) {
+  const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args, ...(world ? { world } : {}) });
   return res?.result;
 }
 

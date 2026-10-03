@@ -1,15 +1,19 @@
-// Podcast source + "show what they're talking about". Injected functions: self-contained.
+// Numbered source text, for podcasts and for written answers that cite where each point
+// came from, plus "show what they're talking about". Injected functions: self-contained.
 //
 // podcastSource numbers the readable blocks of the page (or of one post/section) as
 // [p1], [p2]… and its images, charts and videos as [m1], [m2]…, tagging each element with
 // data-jev-p. The text model cites those ids at the end of each script line, and while a
 // line is spoken showPodcastRefs highlights the text it's about, outlines the image or
-// chart, and scrolls it into view.
+// chart, and scrolls it into view. A citation clicked in an answer does the same.
+//
+// wide: number the whole page, including its navigation, sidebars and footer (answers can
+// be about anything on the page; a podcast is about its main content).
 
-export async function podcastSource(startId, endId, maxChars) {
+export async function podcastSource(startId, endId, maxChars, wide) {
   document.querySelectorAll("[data-jev-p]").forEach((e) => e.removeAttribute("data-jev-p"));
   const SKIP = "script,style,noscript,template,select,option,button,[role=button],[role=menuitem],[role=tab]," +
-    "nav,header,footer,aside,[role=navigation],[role=banner],[role=contentinfo],[role=complementary],[role=dialog]," +
+    (wide ? "" : "nav,header,footer,aside,[role=navigation],[role=banner],[role=contentinfo],[role=complementary],[role=dialog],") +
     ".visually-hidden,.sr-only,[class*=visually-hidden],.__jev_hl";
   const UI = /^(like|comment|comments|repost|reposts|send|share|follow|following|reply|replies|save|more|see more|show more|…more|see translation|translate|edit|report|promoted|suggested|view profile|connect|message|subscribe|load more( comments)?|skip to (main )?content|advertisement|sponsored)$/i;
   const COUNT = /^([\d,.]+\s*[kKmM]?\s*(reactions?|comments?|reposts?|likes?|views?|shares?|followers?)?\s*[•·,]?\s*)+$/i;
@@ -17,7 +21,7 @@ export async function podcastSource(startId, endId, maxChars) {
   // Which part of the page: a located range (outline ids), else the main content.
   const q = (id) => (id ? document.querySelector(`[data-jev-b="${id}"]`) : null);
   const startEl = q(startId), endEl = q(endId);
-  const scope = startEl ? document.body : document.querySelector("article, main, [role=main]") || document.body;
+  const scope = startEl || wide ? document.body : document.querySelector("article, main, [role=main]") || document.body;
   const inRange = (el) => {
     if (!startEl) return true;
     const afterStart = startEl === el || startEl.contains(el) || el.contains(startEl) || !!(startEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);

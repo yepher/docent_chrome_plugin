@@ -44,7 +44,7 @@ Pick **Jev** for the best results, especially for tasks that click and type. Pic
 
 ## Set up LiveKit (optional)
 
-The decision model can't write text, so Docent uses [LiveKit Inference](https://docs.livekit.io/agents/models/) for everything written or spoken: summaries and open questions, text it composes for you (such as a reply), reading aloud, voice input, hands-free conversation, podcasts and page restyling. One LiveKit key covers the text model, text-to-speech and speech-to-text.
+The decision model can't write text, so Docent uses [LiveKit Inference](https://docs.livekit.io/agents/models/) for everything written or spoken: summaries and open questions (about a page or a video), text it composes for you (such as a reply), translation, reading aloud, voice input, hands-free conversation, podcasts and page restyling. One LiveKit key covers the text model, text-to-speech and speech-to-text.
 
 Without LiveKit, Docent can still click and type text from your prompt, answer yes/no, count and list questions, and highlight or hide things.
 
@@ -63,7 +63,8 @@ Type these in the box and press **Run** (or âŒ˜/Ctrl+Enter), or say them with ðŸ
 
 | You say | Docent |
 | --- | --- |
-| `Summarize this page` | Writes a short summary |
+| `Summarize this page` | Writes a short summary; click a number in it to see the part of the page it came from |
+| `Summarize this video` | Answers from a YouTube video's captions; click a time to jump the video there |
 | `How many reviews mention battery life?` | Counts them and outlines them on the page |
 | `Highlight posts about pricing` | Outlines the matching items |
 | `Hide sponsored results` | Hides them; can be saved as a rule for the site |
@@ -71,6 +72,8 @@ Type these in the box and press **Run** (or âŒ˜/Ctrl+Enter), or say them with ðŸ
 | `Make this a podcast` | Two hosts discuss the page; download it as an MP3 |
 | `Summarize the clipboard` | Works on the text you copied |
 | `Change the page background to red` | Restyles the page; `Undo page changes` puts it back |
+| `Translate this page into Spanish` | Rewrites the page's text in Spanish; `Undo page changes` puts it back |
+| `Read this page aloud in French` | Translates each part as it reads |
 | `Search for mechanical keyboards and open the first result` | Clicks and types for you, asking before anything risky |
 
 Press **Alt+Shift+J** for a hands-free conversation: ask one thing after another, talk over Docent to interrupt, and say "goodbye" to finish.

@@ -127,11 +127,42 @@ Jev picks; it doesn't write. For text that isn't in your prompt, the extension c
 It's used in two places, and only when Jev asks for it:
 
 - **Typing:** the `text` Choice gets a `compose` option ("the text isn't in the goal and has to be written"). If Jev picks it, the model writes the field's text from your goal, the page text and the field's label, e.g. *"reply to Ann saying I'll be there"*. The text it wrote is shown in the log. The usual risky-action check still runs before anything is sent.
-- **Open questions:** a new prompt kind, *explain* ("summarize this page", "what does this function do"), streams a written answer into the Answer card, labelled with the model that wrote it. A *lookup* that Jev can't find as a single item on the page also falls back to the model.
+- **Open questions:** a new prompt kind, *explain* ("summarize this page", "what does this function do"), streams a written answer into the Answer card, labelled with the model that wrote it, with [citations](#citations-in-written-answers). A *lookup* that Jev can't find as a single item on the page also falls back to the model.
 
 Everything else (choosing actions, targets, yes/no, counts, lists) stays with the decision model (Jev or Laya).
 
 **How auth works:** the extension mints a short-lived (10 min) LiveKit access token with an `inference.perform` grant, signed HS256 with your API secret, the same token the LiveKit Agents SDK uses. It calls the OpenAI-compatible gateway (`https://agent-gateway.livekit.cloud/v1`, or the staging gateway if your URL is `*.staging.livekit.cloud`) at `/chat/completions` with streaming, and at `/models`. The secret is kept in `chrome.storage.local`, which is **not encrypted**, so use a key from a LiveKit project you're comfortable using for this.
+
+## Citations in written answers
+
+A written answer shows where each sentence came from. Before the text model is asked, the source is split into numbered blocks, and the model ends each sentence with the ids it rests on (`Sales doubled in a year [p14].`). The Answer card shows each id as a small link:
+
+| Source | Blocks | The link shows | Clicking it |
+| --- | --- | --- | --- |
+| A web page | Text blocks `[p12]`, images and charts `[m3]` (`podsource.js`, the same numbering podcasts use) | A number | Highlights that block on the page and scrolls to it; click again to clear |
+| A PDF | Paragraphs `[p12]` | The page, e.g. `p. 4` | Turns Chrome's PDF viewer to that page |
+| A video | About half a minute of captions each, `[t12]` | The time, e.g. `2:35` | Jumps the video to that moment and plays |
+
+For a question about the whole page, the numbering covers navigation, sidebars and footers too, so an answer found there can still be cited. The ids are removed from what is spoken, copied and kept as conversation history. Answers about selected text or the clipboard have no citations. If the page has changed since the answer was written, a citation may no longer be found; the card says so.
+
+## Videos
+
+On a YouTube video, or a page whose `<video>` has caption tracks, questions and summaries are answered from the captions instead of the page text: "summarize this video", "what does she say about pricing?", "when do they talk about the budget?" (`video.js`).
+
+- **YouTube:** the caption track list is read from the player in the page, and the track is fetched as timed text. Your browser's language is preferred, then English, then any other; written captions are preferred over auto-generated ones.
+- **Other sites:** the cues of the video's `<track>` captions are read.
+- The captions are grouped into blocks of about half a minute, up to 100,000 characters (about an hour and three quarters of speech). Each block is a citation, so the answer links to the moment it came from.
+- A request counts as being about the video when it is a question or a summary and either mentions the video (video, transcript, talk, lecture, speaker…) or is asked on a YouTube watch page and isn't about the comments, description or channel.
+- A video with no captions can't be used; Docent says so and answers from the page text. Videos inside iframes (embedded players) aren't found.
+
+## Translation
+
+- **Translate the page in place.** "Translate this page into Spanish" collects the page's visible text (up to 60,000 characters, in reading order), sends it to the text model in numbered batches, four at a time, and puts each translation back as it arrives (`translate.js`). Links, formatting and layout are untouched, because only text nodes change. "Undo page changes" restores the original text. With no language named, it translates into your browser's language. Code blocks and anything marked `translate="no"` are left alone.
+- **Read aloud in another language.** "Read this page aloud in French" translates each chunk just before it is spoken, for pages, selections, posts and PDFs. There is no read-along highlight, since the words spoken aren't the ones on the page. The voice is told the language; how natural it sounds depends on the voice (Cartesia's sonic-3 voices are multilingual).
+- **Answers in another language.** "Summarize this page in German" needs nothing special: the text model writes in German, and a spoken answer tells the voice the language.
+- **A part of the page.** "Translate the first comment" is answered in the Answer card instead of changing the page.
+
+Each text node is translated as a separate fragment, so a sentence broken up by links can come out less fluent than a whole-sentence translation. Pages that redraw themselves (many web apps) may put their original text back.
 
 ## Asking questions about the page
 
@@ -185,6 +216,8 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `jev.js` | `/v1/systemone` client with retry/backoff on 429/529 |
 | `items.js` | Injected functions for find/hide: page segmentation, marking, jump-to, mutation watcher, selection |
 | `restyle.js` | Change the page in place: element outline for the text model, text edits and undo (injected functions) |
+| `translate.js` | Translation: language names, batched translation with the text model, collecting and replacing the page's text (injected functions) |
+| `video.js` | Videos: read a YouTube or `<track>` transcript in timed blocks, jump the video to a moment (injected functions) |
 | `rules.js` | Per-item judging with cache, one-off find/hide, saved per-site rules and auto-apply |
 | `conversation.js` | Hands-free conversation: turn-taking, spoken commands, follow-up rewriting, idle timeout |
 | `decider.js` | Jev or Laya: routes typed questions to the TypeSafe API or the in-browser model, and adapts them for Laya |
@@ -193,7 +226,7 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `pdfdoc.js` | PDFs: detect a PDF tab, extract and cache its text (via the offscreen document), reading chunks, turn the viewer's page |
 | `vendor/pdfjs/` | pdf.js 5.7 legacy build (Apache-2.0) and its CMaps, for reading PDFs |
 | `expressive.js` | Expressive podcasts: per-provider marker instructions and lowering to Cartesia/Fish Audio markup (port of LiveKit Agents' expressive mode) |
-| `podsource.js` | Podcast: number the page's blocks and images/charts, highlight and scroll to the ones being discussed |
+| `podsource.js` | Podcasts and cited answers: number the page's blocks and images/charts, highlight and scroll to the ones being discussed or cited |
 | `vendor/lamejs.mjs` | LAME MP3 encoder (LGPL-3.0, unmodified, licence in `vendor/LAME-LICENSE.txt`) for podcast downloads |
 | `podcast.js` | Podcast mode: two hosts and voices, streamed script writing, turn-by-turn playback with pause/resume |
 | `karaoke.js` | Read-along highlight: find spoken sentences on the page, highlight and follow the current one; progressive page reader (next chunk, load more) |

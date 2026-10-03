@@ -114,6 +114,7 @@ export function sentences(text, max = 400) {
 export const state = { speaking: false, listening: false, paused: false };
 
 // Start a TTS session; push text as it arrives (e.g. while the LLM streams), then end().
+// s.ttsLang (a language code) tells the voice which language the text is in, for translations.
 export async function speakStream(s, opts = {}) {
   await ensureOffscreen();
   await setAuth(s);
@@ -123,7 +124,7 @@ export async function speakStream(s, opts = {}) {
     type: "tts:start",
     url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
     sampleRate: TTS_RATE,
-    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voice ? { voice } : {}), extra: {} },
+    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voice ? { voice } : {}), ...(s.ttsLang ? { language: s.ttsLang } : {}), extra: {} },
     ...(opts.sid ? { sid: opts.sid } : {}),
     ...(opts.capture ? { capture: opts.capture } : {}),
   });
@@ -157,7 +158,7 @@ export async function speakSentences(s, list, offset = 0) {
     type: "tts:start",
     url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
     sampleRate: TTS_RATE,
-    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voiceId ? { voice: voiceId } : {}), extra: {} },
+    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voiceId ? { voice: voiceId } : {}), ...(s.ttsLang ? { language: s.ttsLang } : {}), extra: {} },
   });
   state.speaking = true;
   list.forEach((raw, i) => {
@@ -181,7 +182,7 @@ export async function ttsSpec(s, voiceId) {
   const [model, v] = splitModel(voiceId || s.ttsVoice || DEFAULT_VOICE);
   return {
     url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
-    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(v ? { voice: v } : {}), extra: {} },
+    create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(v ? { voice: v } : {}), ...(s.ttsLang ? { language: s.ttsLang } : {}), extra: {} },
     gen: { model, ...(v ? { voice: v } : {}) },
     sampleRate: TTS_RATE,
   };
