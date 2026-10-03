@@ -644,7 +644,26 @@ function render(run) {
   ol.scrollTop = ol.scrollHeight;
 }
 
+// ---------- a newer version on GitHub ----------
+async function showUpdate() {
+  const u = await send({ type: "docent:update" }).catch(() => null);
+  if (!u?.current) return;
+  const mine = `Docent ${u.current}${u.commit ? ` (${u.commit})` : ""}`;
+  const commits = `${u.behind} commit${u.behind === 1 ? "" : "s"}`;
+  $("versionText").textContent = mine + (!u.newer ? (u.error ? "" : " · up to date") : u.behind ? ` · ${commits} behind` : ` · ${u.latest} is available`);
+  const { docentUpdateHidden } = await chrome.storage.local.get("docentUpdateHidden");
+  $("updateBar").hidden = !u.newer || docentUpdateHidden === u.latest;
+  $("updateText").textContent = u.behind
+    ? `A newer Docent is on GitHub (${commits} since yours).${u.notes ? ` Latest: \u201c${u.notes}\u201d` : ""}`
+    : `Docent ${u.latest} is available (you have ${u.current}).`;
+  $("updateDismiss").onclick = async () => {
+    await chrome.storage.local.set({ docentUpdateHidden: u.latest });
+    $("updateBar").hidden = true;
+  };
+}
+
 (async () => {
+  showUpdate();
   await loadSettings();
   const res = await send({ type: "jev:get" });
   render(res?.run);

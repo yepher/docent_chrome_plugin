@@ -233,6 +233,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         if (msg.kind === "tts-error" && run && run.status === "done") log("warn", `Voice: ${msg.message}`);
         return { ok: true };
+      case "docent:update":
+        return checkForUpdate(!!msg.force);
       case "jev:cite":
         return { ok: await showCitation(msg.ids) };
       case "jev:focus":
@@ -1596,6 +1598,74 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   applyRules(s, tabId, false).catch(() => {});
 });
 chrome.tabs.onRemoved.addListener((tabId) => forgetTab(tabId));
+
+// ---------- is there a newer version? ----------
+// A copy cloned with git knows which commit it is (.git/HEAD), so it asks GitHub how many
+// commits main has that it doesn't. A copy without .git (a downloaded ZIP) compares the
+// version in its manifest with the one on main. Checked when Docent's panel opens, at most
+// every 6 hours.
+const REPO = "yepher/docent_chrome_plugin";
+const UPDATE_EVERY_MS = 6 * 3600_000;
+const newerThan = (a, b) => {
+  const [x, y] = [a, b].map((v) => String(v || "").split(".").map((n) => parseInt(n, 10) || 0));
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+
+// The commit this copy is at, read from its own .git folder ("" if there isn't one).
+async function localCommit() {
+  const read = async (path) => {
+    const res = await fetch(chrome.runtime.getURL(path));
+    if (!res.ok) throw new Error(path);
+    return (await res.text()).trim();
+  };
+  try {
+    const head = await read(".git/HEAD");
+    if (!head.startsWith("ref:")) return head; // detached: HEAD is the commit itself
+    const ref = head.slice(4).trim();
+    const loose = await read(`.git/${ref}`).catch(() => "");
+    if (loose) return loose;
+    const line = (await read(".git/packed-refs")).split("\n").find((l) => l.endsWith(` ${ref}`));
+    return line ? line.split(" ")[0] : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+async function checkForUpdate(force) {
+  const current = chrome.runtime.getManifest().version;
+  const sha = await localCommit();
+  let { docentUpdate: seen } = await chrome.storage.local.get("docentUpdate");
+  if (force || !seen || seen.sha !== sha || seen.current !== current || Date.now() - seen.checked > UPDATE_EVERY_MS) {
+    const was = seen;
+    seen = { checked: Date.now(), sha, current, newer: false, behind: 0, latest: "", notes: "" };
+    try {
+      if (sha) {
+        const res = await fetch(`https://api.github.com/repos/${REPO}/compare/${sha}...main`, { headers: { Accept: "application/vnd.github+json" }, cache: "no-store" });
+        // 404: this commit isn't on GitHub (local work that hasn't been pushed), so there's nothing to compare.
+        if (res.ok) {
+          const j = await res.json();
+          const last = j.commits?.at(-1);
+          seen.behind = j.ahead_by || 0; // commits on main that this copy doesn't have
+          seen.newer = seen.behind > 0;
+          seen.latest = (last?.sha || "").slice(0, 7);
+          seen.notes = (last?.commit?.message || "").split("\n")[0].slice(0, 200);
+        } else if (res.status !== 404) throw new Error(`GitHub: HTTP ${res.status}`);
+      } else {
+        const res = await fetch(`https://raw.githubusercontent.com/${REPO}/main/manifest.json`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`GitHub: HTTP ${res.status}`);
+        seen.latest = String((await res.json()).version || "");
+        seen.newer = newerThan(seen.latest, current);
+      }
+    } catch (e) {
+      // Offline, or GitHub's hourly limit: keep the last answer for this same copy, and try again later.
+      if (was && was.sha === sha && was.current === current) seen = { ...was, checked: Date.now() };
+      seen.error = e.message;
+    }
+    await chrome.storage.local.set({ docentUpdate: seen });
+  }
+  return { current, commit: sha.slice(0, 7), newer: seen.newer, behind: seen.behind, latest: seen.latest, notes: seen.notes, error: seen.error };
+}
 
 // ---------- helpers ----------
 async function inject(tabId, func, args, world) {

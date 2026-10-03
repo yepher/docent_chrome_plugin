@@ -15,6 +15,18 @@ A Chrome extension that acts as a guide for the page you're on. Ask it questions
 
 After changing the code, click the reload arrow on Docent's card in `chrome://extensions`.
 
+## Update
+
+Docent tells you when a newer version is on GitHub: a bar appears at the top of the panel, and ⚙ shows your version at the bottom. To update:
+
+1. Run `git pull` in this folder, or download it again and replace the folder.
+2. Open `chrome://extensions` and click the reload arrow on Docent's card.
+
+The check runs when you open Docent, at most every 6 hours, and asks GitHub about this repository only. Nothing about you or your pages is sent.
+
+- **A copy cloned with git** reads its own commit from its `.git` folder and asks GitHub how many commits `main` has since then. Every push to `main` counts, so there is no version number to bump.
+- **A downloaded copy** (no `.git` folder) compares the `version` in its `manifest.json` with the one on `main`, so it only notices when that number goes up.
+
 ## Choose a decision model: Jev or Laya
 
 The decision model makes Docent's small, typed decisions: what kind of request you made, which element to click, whether a post matches, yes or no. It picks from options and doesn't write text. Choose one in ⚙ → *Decision model*.

@@ -15,6 +15,12 @@
     <button id="settingsBtn" class="icon" title="Settings" aria-label="Settings">⚙</button>
   </header>
 
+  <div id="updateBar" class="update-bar" hidden>
+    <span id="updateText"></span>
+    <a href="https://github.com/yepher/docent_chrome_plugin#update" target="_blank" rel="noopener">How to update</a>
+    <button type="button" id="updateDismiss" class="icon" title="Hide until there is something newer" aria-label="Hide until there is something newer">✕</button>
+  </div>
+
   <section id="settings" hidden>
     <h2>Decision model</h2>
     <label>Who makes the decisions
@@ -119,6 +125,7 @@
     <p class="help">Answers are spoken automatically when you ask with the 🎤 or say "tell me" / "read it out". 🔊 reads the page (or your selection) aloud. 🎧 turns it into a two-host podcast.</p>
 
     <div class="row end">
+      <span id="versionText" class="help"></span>
       <a href="https://console.typesafe.ai" target="_blank">Get a TypeSafe key</a>
       <button id="saveSettings">Save</button>
     </div>

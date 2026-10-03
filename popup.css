@@ -122,3 +122,7 @@ button.chip.ai::before { content: "✦ "; color: var(--accent); }
 #clearBtn:not(:disabled):hover { color: var(--err); }
 .help a { color: var(--accent); }
 #pronunciations { min-height: 44px; }
+.update-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; padding: 6px 8px 6px 10px; border: 1px solid var(--accent); border-radius: 8px; font-size: 12px; }
+.update-bar span { flex: 1; }
+.update-bar a { white-space: nowrap; }
+#versionText { margin-right: auto; }
