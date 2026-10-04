@@ -279,6 +279,74 @@ async function showCite(ids) {
   if (!off && !res?.ok) $("answerNote").textContent = id[0] === "t" ? "Couldn't find the video on the page any more." : "That part isn't on the page any more.";
 }
 
+// ---------- answers: save as Markdown ----------
+// The answer as a Markdown note: the request as the heading, the page it was about, the
+// answer, and its list of matches. Citations become links where a link can say where:
+// a time in a YouTube video, a page of a PDF. Numbered parts of a web page are left out.
+function answerMarkdown(run, tab) {
+  const a = run.answer;
+  const esc = (t) => String(t || "").replace(/\s+/g, " ").trim().replace(/([\[\]])/g, "\\$1");
+  const url = (tab?.url || "").split("#")[0];
+  const youtube = /^https?:\/\/([\w-]+\.)?(youtube\.com|youtu\.be)\//i.test(url);
+  const seconds = (clock) => clock.split(":").reduce((n, x) => n * 60 + Number(x), 0);
+  const link = (id) => {
+    const ref = a.refs?.[id];
+    if (!ref) return "";
+    if (id[0] === "t") {
+      if (!youtube) return `(${ref})`;
+      const u = new URL(url);
+      u.searchParams.set("t", `${seconds(ref)}s`);
+      return `[${ref}](${u})`;
+    }
+    return url ? `[${ref}](${url}#page=${ref.replace(/\D/g, "")})` : `(${ref})`;
+  };
+  let body = !a.cited ? a.text : a.cited.replace(CITE, (_m, list) => {
+    const links = [...new Set(list.toLowerCase().split(/\s*,\s*/).map((item) => link(citeIds(item)[0] || "")).filter(Boolean))];
+    return links.length ? ` ${links.join(", ")}` : "";
+  });
+  // Lines that follow each other (a podcast transcript, a help list) stay separate lines.
+  const isList = (l) => /^\s*([-*]|\d+\.)\s/.test(l);
+  const lines = body.replace(/▶ /g, "").trim().split("\n");
+  body = lines.map((l, i) => {
+    const next = lines[i + 1];
+    return l.trim() && next?.trim() && !(isList(l) && isList(next)) ? `${l}\n` : l;
+  }).join("\n");
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const source = run.source === "clipboard" ? "- **Source:** text from the clipboard"
+    : tab?.url ? `- **Page:** [${esc(tab.title) || url}](${tab.url})` : "";
+  const note = (a.note || "").replace(/ Click a [^.]*\./g, "").trim();
+  return [
+    `# ${esc(run.goal) || "Docent answer"}`,
+    [source, `- **Saved:** ${date}`].filter(Boolean).join("\n"),
+    run.selection && run.source !== "clipboard" ? `> ${run.selection.replace(/\s+/g, " ").trim()}${run.selection.length >= 300 ? "…" : ""}` : "",
+    body,
+    (a.items || []).map((it, i) => `${i + 1}. ${it.text.replace(/\s+/g, " ").trim()}`).join("\n"),
+    `---\n\n*${[note, `Saved from Docent ${chrome.runtime.getManifest().version}.`].filter(Boolean).join(" ")}*`,
+  ].filter(Boolean).join("\n\n") + "\n";
+}
+$("mdBtn").onclick = async () => {
+  const run = lastRun;
+  if (!run?.answer) return;
+  const tab = run.tabId != null ? await chrome.tabs.get(run.tabId).catch(() => null) : null;
+  const safe = (t, n) => String(t || "").replace(/[\\/:*?"<>|#%~\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, n).trim().replace(/^\.+|\.+$/g, "");
+  const name = [run.source === "clipboard" ? "Clipboard" : safe(tab?.title, 60), safe(run.goal, 40)].filter(Boolean).join(" - ") || "Docent answer";
+  let ok = true;
+  try {
+    await chrome.downloads.download({
+      url: "data:text/markdown;charset=utf-8," + encodeURIComponent(answerMarkdown(run, tab)),
+      filename: `Docent notes/${name}.md`,
+      conflictAction: "uniquify",
+    });
+  } catch (e) {
+    ok = false;
+    $("answerNote").textContent = `Couldn't save the file: ${e.message}`;
+  }
+  $("mdBtn").textContent = ok ? "Saved" : "Not saved";
+  setTimeout(() => ($("mdBtn").textContent = "⬇ .md"), 1500);
+};
+
 // ---------- answers: jump to items, undo, save as rule ----------
 function focusItem(it) {
   if (lastRun?.tabId != null && it?.ref) send({ type: "jev:focus", tabId: lastRun.tabId, ref: it.ref });

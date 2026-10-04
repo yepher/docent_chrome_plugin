@@ -23,6 +23,7 @@ import { pickTarget as pickTargetFromOutline } from "./targets.js";
 import { pageSkeleton, applyEdits, undoEdits } from "./restyle.js";
 import { languageIn, uiLanguage, translateLines, collectTexts, applyTexts, pageLanguage } from "./translate.js";
 import { videoTranscript, seekVideo } from "./video.js";
+import { readerView, termContext } from "./reading.js";
 import { modeFor, runFilter, applyRules, reapplyRules, getRules, saveRule, updateRule, deleteRule, forgetTab } from "./rules.js";
 
 export const DEFAULTS = {
@@ -105,6 +106,12 @@ Change the page
 Translate
 - "Translate this page into Spanish" rewrites the page; "Undo page changes" puts it back
 - "Read this page aloud in French", "Summarize this page in German"
+
+Read more easily
+- "Reader view" shows just the article, without the clutter; Esc or "Exit reader view" closes it
+- "Explain this simply", "Summarize this page in plain English"
+- "Define ephemeral", "What does amortize mean?", or select a word, right-click, "Define …"
+- "⬇ .md" on an answer saves it as a Markdown file
 
 Do things for you
 - "Search for mechanical keyboards and open the first result"
@@ -279,8 +286,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 function publicRun() {
   if (!run) return { run: null };
-  const { goal, tabId, status, log, pending, step, answer, selection, speak, heard, suggestions } = run;
-  return { run: { goal, tabId, status, log, pending, step, answer, heard, suggestions, speak: !!speak, selection: selection ? selection.slice(0, 300) : "" } };
+  const { goal, tabId, status, log, pending, step, answer, selection, speak, heard, suggestions, source } = run;
+  return { run: { goal, tabId, status, log, pending, step, answer, heard, suggestions, source, speak: !!speak, selection: selection ? selection.slice(0, 300) : "" } };
 }
 
 function publish() {
@@ -319,7 +326,7 @@ function spokenAnswer(a) {
 
 // ---------- the loop ----------
 async function startRun(goal, tabId, selection, opts = {}) {
-  run = { goal, tabId, selection, speak: !!opts.voice, read: !!opts.read, podcast: !!opts.podcast, kind: opts.read ? "read" : opts.podcast ? "podcast" : "", heard: opts.heard || "", history: opts.history || null, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
+  run = { goal, tabId, selection, speak: !!opts.voice, read: !!opts.read, podcast: !!opts.podcast, define: !!opts.define, kind: opts.read ? "read" : opts.podcast ? "podcast" : "", heard: opts.heard || "", history: opts.history || null, status: "running", log: [], pending: null, step: 0, abort: new AbortController() };
   // Extension API calls keep the MV3 service worker alive during long waits (e.g. confirmation).
   run.keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   publish();
@@ -354,6 +361,20 @@ async function agentLoop(r) {
   r.pdf = await pdfFor(tab0, (f, a) => inject(r.tabId, f, a)).catch((e) => { throw new Error(`This looks like a PDF, but ${e.message.replace(/^./, (c) => c.toLowerCase())}`); });
   r.url = tab0.url || "";
   if (TRANSLATE_PAGE.test(r.goal.trim()) && !TRANSLATE_PART.test(r.goal) && !r.selection && !r.pdf && !r.read && !r.podcast) return translatePage(r, s);
+  if (!r.read && !r.podcast) {
+    const goal = r.goal.trim();
+    if (READER.test(goal) && goal.split(/\s+/).length <= 8) return readerMode(r);
+    const term = termToDefine(r);
+    if (term && lkConfigured(s)) return defineTerm(r, s, term);
+    if (r.define) return finish("stopped", "Defining a word needs a text model to write the definition. Add your LiveKit URL, key and secret in Settings.");
+    // "Explain this simply": clear-cut, so it doesn't need the decision model.
+    if (lkConfigured(s) && SIMPLY.test(goal) && EXPLAIN_QUICK.test(goal)) {
+      r.kind = "explain";
+      if (WANTS_VOICE.test(goal)) r.speak = true;
+      log("info", `Goal: ${r.goal}`, r.selection ? `with ${fromClipboard(r) ? "clipboard" : "selected"} text: "${r.selection.slice(0, 100)}${r.selection.length > 100 ? "…" : ""}"` : undefined);
+      return writtenAnswer(r, s);
+    }
+  }
   if (r.pdf) log("info", `PDF: "${r.pdf.title.slice(0, 80)}", ${r.pdf.numPages} page${r.pdf.numPages === 1 ? "" : "s"}, ${r.pdf.paras.length} paragraphs.`, r.pdf.pagesRead < r.pdf.numPages ? `Read the first ${r.pdf.pagesRead} pages.` : "Read with pdf.js.");
   if (r.read) {
     if (!lkConfigured(s)) throw new Error("Reading aloud uses LiveKit Inference TTS. Add your LiveKit URL, key and secret in Settings.");
@@ -654,6 +675,9 @@ const kindsFor = (llm) => llm
       podcast: "A request to turn the page, article, post, thread or selected text into a podcast, or a spoken discussion or conversation between two voices to listen to" }
   : PROMPT_KINDS;
 
+const EXPLAIN_QUICK = /^(please )?(summari[sz]e|explain|describe|translate|tl;?dr|give me (a|the) (summary|gist|key points)|what('?s| is) (this|the) (page|article|post|thread) about)/i;
+// "Explain this simply", "summarize it in plain English", "explain like I'm five".
+const SIMPLY = /\b(simply|simpler|in (simple|plain|everyday) (terms|words|language|english)|like i('| a)?m (5|five|a (child|kid|beginner))|eli5|for (a )?(beginner|child|kid|layperson|non-expert)s?)\b/i;
 const EXPLAIN_KIND = "A request for a written answer about the current page: summarize, explain, describe, compare, translate, or an open question that isn't yes/no, a count, a list or one value";
 
 // Laya is weaker than Jev at sorting prompts into many kinds, so with Laya: clear-cut
@@ -661,7 +685,7 @@ const EXPLAIN_KIND = "A request for a written answer about the current page: sum
 const QUICK_KINDS = [
   ["podcast", /\bpodcast\b|\b(discussion|conversation) (i|we) can listen/i, true],
   ["read", /^(please )?(read|narrate)\b(?!.*\b(and|then) (summari|explain|tell))/i, true],
-  ["explain", /^(please )?(summari[sz]e|explain|describe|translate|tl;?dr|give me (a|the) (summary|gist|key points)|what('?s| is) (this|the) (page|article|post|thread) about)/i, true],
+  ["explain", EXPLAIN_QUICK, true],
   ["count", /^how many\b/i],
   ["hide", /^(please )?(hide|remove|filter out|dim|fade|get rid of|mute)\b/i],
   ["find", /^(please )?(highlight|mark|outline|show me where)\b/i],
@@ -922,9 +946,89 @@ async function undoChanges(r) {
   for (const css of list) await chrome.scripting.removeCSS({ target: { tabId: r.tabId }, css, origin: "USER" }).catch(() => {});
   await chrome.storage.session.remove(cssKey(r.tabId));
   const restored = (await inject(r.tabId, undoEdits, []).catch(() => 0)) || 0;
-  if (!list.length && !restored) return finish("done", "There were no Docent changes on this page to undo. Reloading the page also resets it.");
-  r.answer = { text: "Page changes undone", note: `${list.length} style change${list.length === 1 ? "" : "s"} and ${restored} text edit${restored === 1 ? "" : "s"} removed.`, items: [] };
+  const reader = !!(await inject(r.tabId, readerView, ["off"]).catch(() => null))?.closed;
+  if (!list.length && !restored) return finish("done", reader ? "Reader view closed." : "There were no Docent changes on this page to undo. Reloading the page also resets it.");
+  r.answer = { text: "Page changes undone", note: `${list.length} style change${list.length === 1 ? "" : "s"} and ${restored} text edit${restored === 1 ? "" : "s"} removed${reader ? ", and reader view closed" : ""}.`, items: [] };
   finish("done", "Undone.");
+}
+
+// ---------- reading aids (reading.js) ----------
+// "Reader view", "reading mode", "distraction-free mode": show just the article. No model needed.
+const READER = /\b(reader|reading|distraction[- ]free|focus) (view|mode)\b|^(please )?(declutter|clean up) (this|the) page\b/i;
+const READER_OFF = /^(please )?(exit|close|leave|quit|stop|end|turn off|switch off|disable|hide)\b/i;
+
+async function readerMode(r) {
+  r.kind = "reader";
+  if (r.pdf) return finish("stopped", "Reader view works on web pages. Chrome's PDF viewer can't be changed.");
+  const off = READER_OFF.test(r.goal.trim());
+  let res;
+  try {
+    res = await inject(r.tabId, readerView, [off ? "off" : "toggle"]);
+  } catch (e) {
+    throw new Error(`Can't open reader view on this page (${e.message}). Chrome blocks extensions on chrome:// pages, the Web Store and some viewers.`);
+  }
+  if (res?.open) {
+    const mins = Math.max(1, Math.round(res.words / 230));
+    r.answer = {
+      text: "Reader view is on",
+      note: `About ${res.words.toLocaleString()} words, a ${mins} minute read${res.images ? `, ${res.images} image${res.images === 1 ? "" : "s"}` : ""}. Press Esc on the page, or ask "Exit reader view", to go back. Only this tab is changed.`,
+      items: [],
+    };
+    return finish("done", "Reader view opened.");
+  }
+  r.kind = "";
+  if (res?.closed) return finish("done", "Reader view closed.");
+  if (off) return finish("done", "Reader view wasn't open on this page.");
+  finish("stopped", "Couldn't find an article on this page to show in reader view.");
+}
+
+// "Define ephemeral", "what does amortize mean here?", or Define "…" in the right-click menu.
+const DEFINE_TAIL = "(?:\\s+(?:here|in this context|on this page))?[\\s?.!]*$";
+const DEFINE = [
+  new RegExp(`^(?:please )?(?:define|what(?:'s| is) (?:the )?(?:meaning|definition) of|what(?:'s| is) meant by)\\s+(.+?)${DEFINE_TAIL}`, "i"),
+  new RegExp(`^(?:please )?what does\\s+(.+?)\\s+mean${DEFINE_TAIL}`, "i"),
+];
+const DEFINE_THIS = /^(this|that|it|these|the selection|the selected (text|word|words|phrase)|(this|that|the) (word|term|phrase|passage|sentence))$/i;
+
+// The word or phrase to define, or null if the request isn't one. A typed term has to be
+// short ("define X" with a long X is a task or a question); a selection can be any length.
+function termToDefine(r) {
+  if (r.define) return r.selection.trim() || null;
+  const m = DEFINE.map((re) => re.exec(r.goal.trim())).find(Boolean);
+  if (!m) return null;
+  const term = m[1].trim().replace(/^(the )?(word|term|phrase|acronym|abbreviation)\s+/i, "").replace(/^["'“‘](.*)["'”’]$/, "$1").trim();
+  if (DEFINE_THIS.test(term)) return r.selection.trim() || null;
+  return term && term.length <= 60 && term.split(/\s+/).length <= 6 ? term : null;
+}
+
+async function defineTerm(r, llm, term) {
+  r.kind = "define";
+  log("info", `Goal: ${r.goal}`);
+  const passage = term.length > 120 || term.split(/\s+/).length > 12;
+  const model = llm.lkModel || DEFAULT_MODEL;
+  // The paragraph it appears in, so the meaning given is the one used here.
+  const context = passage || r.pdf || fromClipboard(r) ? "" : (await inject(r.tabId, termContext, [term, 700]).catch(() => "")) || "";
+  const title = fromClipboard(r) ? "" : r.pdf?.title || (await chrome.tabs.get(r.tabId).catch(() => null))?.title || "";
+  r.answer = { text: "", note: "", items: [], long: true };
+  log("info", `Asking ${model}…`);
+  let last = 0;
+  const text = await chat(llm, [
+    { role: "system", content: passage
+      ? "You explain what a passage means, for a reader who found it hard to follow. Say what it means in plain everyday words and short sentences, and explain any jargon in it. Plain text, no markdown, under 120 words."
+      : "You explain what a word or phrase means, for someone reading a web page. Give the meaning it has in the context provided, in one or two plain sentences. If it is an abbreviation, say what it stands for. Mention a second meaning only if the context leaves it unclear which is meant. Plain text, no markdown, under 70 words." },
+    { role: "user", content: `${title ? `Page: ${title}\n` : ""}${context ? `Where it appears: "${context}"\n` : ""}\n${passage ? "Passage" : "Word or phrase"}: ${term.slice(0, 4000)}` },
+  ], {
+    signal: r.abort.signal,
+    maxTokens: 300,
+    onDelta: (t) => {
+      r.answer.text = t;
+      if (Date.now() - last > 150) { last = Date.now(); publish(); }
+    },
+  });
+  r.answer.text = text.trim() || "(the model returned nothing)";
+  r.answer.note = `Written by ${model}${context ? ", for how it is used on this page" : ""}. Not checked by ${deciderName(r.settings || llm)}.`;
+  log("answer", r.answer.text.length > 140 ? r.answer.text.slice(0, 137) + "…" : r.answer.text, r.answer.note);
+  finish("done", "Defined.");
 }
 
 // ---------- translate the page in place (translate.js) ----------
@@ -1332,11 +1436,12 @@ async function makePodcast(r, s) {
 const SUGGEST = {
   read: ["Summarize this page", "podcast", "What are the key takeaways?"],
   podcast: ["download", "Summarize this page", "read"],
-  explain: ["podcast", "read", "What are the key takeaways?"],
-  task: ["Summarize this page", "What can I do on this page?"],
+  explain: ["Explain this simply", "podcast", "read", "What are the key takeaways?"],
+  task: ["Summarize this page", "What can I do on this page?", "Reader view"],
+  reader: ["Exit reader view", "Summarize this page", "podcast"],
   change: ["Undo page changes", "Summarize this page", "read"],
   translate: ["Undo page changes", "Summarize this page", "podcast"],
-  default: ["Summarize this page", "podcast", "read"],
+  default: ["Summarize this page", "podcast", "read", "Reader view"],
 };
 function staticSuggestions(r) {
   const sel = !!r.selection;
@@ -1352,7 +1457,7 @@ function staticSuggestions(r) {
 
 async function suggestNext(r) {
   const base = staticSuggestions(r);
-  r.suggestions = base.slice(0, 3);
+  r.suggestions = base.slice(0, 4);
   publish();
   const s = r.settings;
   if (!s || !lkConfigured(s)) return;
@@ -1522,7 +1627,7 @@ async function writtenAnswer(r, llm) {
   const label = fromClipboard(r) ? "Text on the user's clipboard" : r.selection ? "Text the user selected on the page"
     : cite?.type === "video" ? "Transcript" : page.item ? "The post or item on the page the user means" : "Page text";
   const text = await chat(llm, [
-    { role: "system", content: `You answer questions about ${subject}. Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the text doesn't contain the answer, say so.${citing}` },
+    { role: "system", content: `You answer questions about ${subject}. Be concise. Plain text: short paragraphs or '- ' bullets, no markdown headings or bold. If the text doesn't contain the answer, say so.${SIMPLY.test(r.goal) ? " Write for a curious reader who is new to the subject: plain everyday words, short sentences, and a brief explanation of any jargon you can't avoid." : ""}${citing}` },
     ...(r.history?.length ? [{ role: "system", content: `Conversation so far (for context):\n${r.history.map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`).join("\n")}` }] : []),
     { role: "user", content: `${fromClipboard(r) ? "" : `${cite?.type === "video" ? "Video" : "Page"} title: ${page.title}\n${page.author ? `Channel: ${page.author}\n` : ""}URL: ${page.url}\n\n`}${label}:\n${page.text}\n\nQuestion: ${r.goal}` },
   ], {
@@ -1575,18 +1680,32 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: "jev-selection", title: "Ask Docent about \"%s\"", contexts: ["selection"] });
+    chrome.contextMenus.create({ id: "docent-define", title: "Define \"%s\"", contexts: ["selection"] });
+    chrome.contextMenus.create({ id: "docent-simplify", title: "Explain this simply", contexts: ["selection"] });
     chrome.contextMenus.create({ id: "jev-page", title: "Ask Docent about this page", contexts: ["page"] });
+    chrome.contextMenus.create({ id: "docent-reader", title: "Reader view", contexts: ["page"] });
   });
 });
+// Menu items that start a run straight away, instead of waiting for a prompt.
+const MENU_GOALS = { "docent-define": "Define the selected text", "docent-simplify": "Explain this simply", "docent-reader": "Reader view" };
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!tab?.id) return;
   // Must be called straight from the click (user gesture), before any await.
-  chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+  const id = info.menuItemId;
+  if (id !== "docent-reader") chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
   (async () => {
     let selection = "";
-    if (info.menuItemId === "jev-selection") {
+    if (info.selectionText) {
       selection = (await inject(tab.id, getSelectionText).catch(() => "")) || info.selectionText || "";
+    }
+    const busy = run?.status === "running" || run?.status === "confirm";
+    if (MENU_GOALS[id] && !busy) {
+      stopReadingOut();
+      await voice.stopSpeaking();
+      const word = selection.replace(/\s+/g, " ").trim();
+      const goal = id === "docent-define" && word.length <= 60 ? `Define "${word}"` : MENU_GOALS[id];
+      return startRun(goal, tab.id, selection, { define: id === "docent-define" });
     }
     await chrome.storage.session.set({ jevPending: { selection, tabId: tab.id, t: Date.now() } });
   })();

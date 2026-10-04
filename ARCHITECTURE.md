@@ -106,6 +106,7 @@ Local files (`file://…pdf`) need *Allow access to file URLs* on Docent's detai
 ## Side panel and right-click
 
 - **◨** in the popup header moves Docent into Chrome's side panel, which stays open while you click around the page. To make the toolbar icon always open the panel, set *Toolbar icon opens → Side panel* in ⚙.
+- The right-click menu also has **Define "…"** and **Explain this simply** for selected text, and **Reader view** for the page. These start straight away (see [Reading aids](#reading-aids)).
 - Select text on any page, right-click, and choose **Ask Docent about "…"**. The side panel opens with the selection attached (shown as a chip above the prompt; ✕ removes it). Questions are then answered from the selection instead of the whole page. For example, "is this a good price?" gets a yes/no from the selection, "explain this" uses the text model, and "search for this" types the selection. **Ask Docent about this page** opens the panel without a selection.
 
 ## Find, hide and dim by meaning
@@ -164,6 +165,16 @@ On a YouTube video, or a page whose `<video>` has caption tracks, questions and 
 
 Each text node is translated as a separate fragment, so a sentence broken up by links can come out less fluent than a whole-sentence translation. Pages that redraw themselves (many web apps) may put their original text back.
 
+## Reading aids
+
+- **Reader view.** "Reader view", "reading mode" or "distraction-free mode" (or right-click the page → *Reader view*) shows just the article in a full-window overlay: headings, paragraphs, lists, images, tables and code, in a readable column that follows your light or dark setting. `reading.js` picks the main content the way reading aloud does, then rebuilds it from the visible elements, leaving out navigation, forms, share bars, related links and sign-up boxes. The overlay lives in a shadow root beside `<body>`, so the site's styles don't reach it and the page underneath isn't changed. **A−** / **A+** change the text size. Esc, **✕ Close**, "Exit reader view" or "Undo page changes" closes it. It needs no model or key. While it's open, the read-along highlight and citation highlights are drawn on the page underneath, so they aren't visible.
+- **Explain this simply.** "Explain this simply", "summarize this page in plain English" or "explain it like I'm five" asks the text model to write for a reader new to the subject: plain words, short sentences, jargon explained. With a text model set up, these wordings go straight to it without the decision model. It works on a selection too (right-click → *Explain this simply*).
+- **Define.** "Define ephemeral" or "what does amortize mean here?", or select a word and right-click → *Define "…"*. The text model gets the word along with the paragraph it appears in (the selection's, or the first place the word occurs on the page), so the meaning given is the one used here. A long selection is explained as a passage instead. A typed term has to be short (up to six words); anything longer is treated as an ordinary request.
+
+## Saving an answer as Markdown
+
+**⬇ .md** on the Answer card saves the answer to `Downloads/Docent notes/` as `<page title> - <request>.md`: the request as the heading, a link to the page, the date, the selected text if there was one, the answer, and its list of matches. Citations become links where a link can say where: a time in a YouTube video (`…&t=155s`) or a page of a PDF (`#page=4`). The numbered citations of a web page are left out, since they only mean something in the Answer card. Podcast transcripts and the help text save the same way.
+
 ## Asking questions about the page
 
 The first request classifies the prompt: a **task**, or a question about the page (yes/no, count, list, or lookup). Questions skip the action loop, and the answer appears in a green **Answer** card in the popup, with a Copy button. Jev can't write an answer, so code builds one from its typed judgements:
@@ -216,6 +227,7 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `jev.js` | `/v1/systemone` client with retry/backoff on 429/529 |
 | `items.js` | Injected functions for find/hide: page segmentation, marking, jump-to, mutation watcher, selection |
 | `restyle.js` | Change the page in place: element outline for the text model, text edits and undo (injected functions) |
+| `reading.js` | Reading aids: build and close the reader view overlay, find the paragraph a word appears in (injected functions) |
 | `translate.js` | Translation: language names, batched translation with the text model, collecting and replacing the page's text (injected functions) |
 | `video.js` | Videos: read a YouTube or `<track>` transcript in timed blocks, jump the video to a moment (injected functions) |
 | `rules.js` | Per-item judging with cache, one-off find/hide, saved per-site rules and auto-apply |

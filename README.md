@@ -75,7 +75,7 @@ Type these in the box and press **Run** (or âŒ˜/Ctrl+Enter), or say them with ðŸ
 
 | You say | Docent |
 | --- | --- |
-| `Summarize this page` | Writes a short summary; click a number in it to see the part of the page it came from |
+| `Summarize this page` | Writes a short summary; click a number in it to see the part of the page it came from. **â¬‡ .md** saves any answer as a Markdown file |
 | `Summarize this video` | Answers from a YouTube video's captions; click a time to jump the video there |
 | `How many reviews mention battery life?` | Counts them and outlines them on the page |
 | `Highlight posts about pricing` | Outlines the matching items |
@@ -86,6 +86,9 @@ Type these in the box and press **Run** (or âŒ˜/Ctrl+Enter), or say them with ðŸ
 | `Change the page background to red` | Restyles the page; `Undo page changes` puts it back |
 | `Translate this page into Spanish` | Rewrites the page's text in Spanish; `Undo page changes` puts it back |
 | `Read this page aloud in French` | Translates each part as it reads |
+| `Reader view` | Shows just the article, without the clutter; Esc or `Exit reader view` closes it |
+| `Explain this simply` | Answers in plain everyday words, explaining the jargon |
+| `Define ephemeral` | Says what the word means as it's used on this page; or select a word, right-click, **Define** |
 | `Search for mechanical keyboards and open the first result` | Clicks and types for you, asking before anything risky |
 
 Press **Alt+Shift+J** for a hands-free conversation: ask one thing after another, talk over Docent to interrupt, and say "goodbye" to finish.
