@@ -32,6 +32,8 @@
     "contextMenus",
     "offscreen",
     "clipboardRead",
+    "clipboardWrite",
+    "cookies",
     "declarativeNetRequest",
     "downloads",
     "unlimitedStorage"
@@ -59,6 +61,7 @@
       "description": "Pause or resume what Docent is saying"
     }
   },
+  "devtools_page": "devtools.html",
   "side_panel": {
     "default_path": "popup.html?panel=1"
   },

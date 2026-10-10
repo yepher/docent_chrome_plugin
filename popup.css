@@ -88,7 +88,7 @@ select { width: 100%; font: inherit; color: var(--fg); background: var(--field);
 .rules li.off .rule-text { opacity: .5; text-decoration: line-through; }
 .mode-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--muted); }
 .log li { white-space: pre-line; }
-#confirmText { white-space: pre-line; }
+#confirmText { white-space: pre-wrap; display: block; max-height: 40vh; overflow-y: auto; }
 .row.tight select { margin-top: 0; flex: 1; }
 #lkModelCustom { margin-top: 6px; }
 .icon-btn { padding: 5px 9px; font-size: 14px; line-height: 1; }

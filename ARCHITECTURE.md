@@ -175,6 +175,31 @@ Each text node is translated as a separate fragment, so a sentence broken up by 
 
 **⬇ .md** on the Answer card saves the answer to `Downloads/Docent notes/` as `<page title> - <request>.md`: the request as the heading, a link to the page, the date, the selected text if there was one, the answer, and its list of matches. Citations become links where a link can say where: a time in a YouTube video (`…&t=155s`) or a page of a PDF (`#page=4`). The numbered citations of a web page are left out, since they only mean something in the Answer card. Podcast transcripts and the help text save the same way.
 
+## Developer tools: the Network panel and running JavaScript
+
+Docent has a DevTools page (`devtools.html`, `devtools.js`), which Chrome loads whenever DevTools is opened on a tab. It adds no panel; it's how Docent reads the **Network panel** and runs code **the way the Console does**. DevTools has to be opened after Docent was installed or updated (close and reopen it once if it was already open).
+
+- **Where a table's data came from.** "What API is used for the data in this table?", "which request loads this list?", "where does this data come from?" (`DATA_SOURCE` in `network.js`). Found by exact matching, with no model:
+  1. The values in the page's main table are read by column: the `<table>` or ARIA grid with the most rows, or else the largest group of same-shaped rows (`tableValues`). With text selected, the selected lines are used instead.
+  2. Every recorded text response (up to the last 300, scripts and styles left out) is checked for each value, as written or JSON-escaped. The response holding the most of them is the source; others with a fair share are listed under the answer.
+  3. For a JSON response, the value's path is found (`data.members[].person.email`), and each column is given the field most of its values came from, plus the list the rows come from and how many items it has. A grid built from divs gets its column names from a first row that matched nothing.
+  4. A curl command is built from the request (browser-only headers left out). `Authorization` and `Cookie` become `$TOKEN` and `$COOKIE`, filled in from shell variables; DevTools' *Copy as cURL* gives the real ones.
+  - Values the page reformats (dates, phone numbers, "Chris Ackermann" from two fields) can't be matched, so the count is a lower bound. Data from WebSockets, or loaded before DevTools was opened, isn't found: reload with DevTools open.
+- **Copying a login token or cookie for the terminal.** "Copy the authorization token to the clipboard", "put the session_id cookie on the clipboard", "copy all cookies", "copy the x-csrf-token header", "copy the bearer token into $ORG_TOKEN". What's copied is a line to paste into a terminal, `export TOKEN='eyJ…'`, so it can be used with the curl commands above (`$TOKEN`, `$COOKIE`). "Just the value" copies the value alone.
+  - **Cookies** are read with `chrome.cookies` (the `cookies` permission), so HttpOnly login cookies the page itself can't see are included, and DevTools isn't needed. Any cookie of the site can be named (the cookies sent to the page, plus those of the rest of the site, e.g. an API subdomain); the longest name found in the request wins. The variable is the cookie's name in capitals (`session_id` → `$SESSION_ID`). "All cookies" gives the Cookie header for the page as `$COOKIE`. If no cookie is named, the site's cookie names are listed.
+  - **Headers** (Authorization by default, or "the … header") come from the newest request DevTools recorded, preferring the page's own site over analytics and other third parties. An Authorization header's scheme (`Bearer`) is left out, so `$TOKEN` drops into `-H "Authorization: Bearer $TOKEN"`. If none was recorded, the site's likeliest login cookie (a name with auth, token or jwt, or a session id) is used instead, and the answer says so.
+  - The value is written to the clipboard by the offscreen document. It's never shown in the panel, written to the log, spoken or sent to a model; the answer says only what was copied, its length and where it came from. It stays on the clipboard until you copy something else.
+- **Questions about the requests.** "Which API call returns the emails?", "which requests failed?", "what's the response of the /users call?", "show the headers sent to /login", "what endpoints does this page call?" (recognised by wording such as *network tab*, *API call*, *request to*, *response body*, *endpoint*, *XHR*, *status code*; `network.js`):
+  1. The Network panel's requests are read with `chrome.devtools.network.getHAR()`: everything DevTools recorded, so reload the page with DevTools open to capture what happened at load.
+  2. Words from the question ("emails" → `email`) are searched for in every text response body (up to the last 150), so requests can be picked by what they returned, not only by their URL.
+  3. The text model gets one line per request (method, status, type, MIME type, size, time, URL and the word matches; up to 250, leaving out images, fonts and stylesheets on busy pages) and picks up to six to open.
+  4. Their request and response headers, request body and response body (JSON with whitespace removed, about 48,000 characters in all) go to the text model with the question, and the answer streams into the Answer card, naming the requests it used. They're listed under the answer.
+  - `Authorization`, `Cookie`, `Set-Cookie`, API-key and CSRF header values are replaced with `[hidden]` before anything is sent to the model.
+  - **Without DevTools open**, Docent uses the page's own Resource Timing list (URLs, types, sizes, timings and usually the status), with no headers, methods or bodies, and says to open DevTools for more. Without a text model, it lists the requests that mention your words.
+- **Running JavaScript.** "Run `document.title`", "javascript: [...document.links].length", "run document.querySelectorAll('tr').length in the console", or select code and say "run this". The value of the last expression is shown in the Answer card, formatted like the Console (DOM elements as `<tag#id.class> "text"`, objects as JSON, with circular references and long lists cut short). `await` works.
+  - "Use JavaScript to list every link on this page" has the text model write the code from an outline of the page's elements. **It shows you the code and runs it only when you click Allow.**
+  - With DevTools open, code runs through `chrome.devtools.inspectedWindow.eval`, which pages can't block. Otherwise it runs with `eval` in the page's own world (`chrome.scripting`, `world: "MAIN"`), which a strict Content Security Policy blocks; Docent then says to open DevTools.
+
 ## Asking questions about the page
 
 The first request classifies the prompt: a **task**, or a question about the page (yes/no, count, list, or lookup). Questions skip the action loop, and the answer appears in a green **Answer** card in the popup, with a Copy button. Jev can't write an answer, so code builds one from its typed judgements:
@@ -222,13 +247,16 @@ The agent runs in the background service worker, so you can close the popup; reo
 
 | File | Role |
 | --- | --- |
-| `manifest.json` | MV3 manifest (activeTab, scripting, storage, tabs, sidePanel, contextMenus, offscreen, clipboardRead, declarativeNetRequest, `<all_urls>`) |
+| `manifest.json` | MV3 manifest (activeTab, scripting, storage, tabs, sidePanel, contextMenus, offscreen, clipboardRead, clipboardWrite, cookies, declarativeNetRequest, `<all_urls>`) and the DevTools page |
 | `background.js` | Agent loop, question building, safety gate, run state |
 | `jev.js` | `/v1/systemone` client with retry/backoff on 429/529 |
 | `items.js` | Injected functions for find/hide: page segmentation, marking, jump-to, mutation watcher, selection |
 | `restyle.js` | Change the page in place: element outline for the text model, text edits and undo (injected functions) |
 | `reading.js` | Reading aids: build and close the reader view overlay, find the paragraph a word appears in (injected functions) |
 | `translate.js` | Translation: language names, batched translation with the text model, collecting and replacing the page's text (injected functions) |
+| `network.js` | Developer tools: recognise network and JavaScript requests, talk to the DevTools page, request lists and details for the text model (headers hidden), run code in the page |
+| `devtools.*` | DevTools page: reads the Network panel (HAR, response bodies, word search) and runs code like the Console, for the service worker |
+| `serialize.js` | Formats a value from the page as readable text, like the Console |
 | `video.js` | Videos: read a YouTube or `<track>` transcript in timed blocks, jump the video to a moment (injected functions) |
 | `rules.js` | Per-item judging with cache, one-off find/hide, saved per-site rules and auto-apply |
 | `conversation.js` | Hands-free conversation: turn-taking, spoken commands, follow-up rewriting, idle timeout |

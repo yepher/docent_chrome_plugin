@@ -24,6 +24,8 @@ import { pageSkeleton, applyEdits, undoEdits } from "./restyle.js";
 import { languageIn, uiLanguage, translateLines, collectTexts, applyTexts, pageLanguage } from "./translate.js";
 import { videoTranscript, seekVideo } from "./video.js";
 import { readerView, termContext } from "./reading.js";
+import { DATA_SOURCE, tableValues, curlFor, COPY_SECRET, ALL_COOKIES, RAW_VALUE, headerIn, variableIn, shellName, cookieIn, loginCookie, exportLine } from "./network.js";
+import { NETWORK, RUN_JS, codeIn, devtoolsOpen, devtoolsCall, pageResources, runCode, searchTerms, requestLines, detailText, parseIds, PICK_PROMPT, ANSWER_PROMPT, CODE_PROMPT } from "./network.js";
 import { modeFor, runFilter, applyRules, reapplyRules, getRules, saveRule, updateRule, deleteRule, forgetTab } from "./rules.js";
 
 export const DEFAULTS = {
@@ -117,6 +119,12 @@ Do things for you
 - "Search for mechanical keyboards and open the first result"
 - "Go to example.com", "Type "hello" in the message box"
 - Docent asks before anything that buys, sends, posts or deletes
+
+Developer tools (open DevTools on the tab first)
+- "What API is used for the data in this table?" finds the response the table came from, its fields and a curl command
+- "Which API call returns the emails?", "Which requests failed?", "Show the headers sent to /login"
+- "Copy the authorization token to the clipboard", "Copy the session_id cookie", "Copy all cookies" (pasted as export NAME='…')
+- "Run \`document.title\`", "Use JavaScript to count the table rows" (Docent shows code it wrote before running it)
 
 Use the clipboard or a selection
 - "Read the clipboard aloud", "Summarize the clipboard", "Make a podcast of what I copied"
@@ -344,6 +352,8 @@ async function agentLoop(r) {
   if (s.speakAnswers && lkConfigured(s)) r.speak = true;
   if (HELP.test(r.goal.trim()) && !r.read && !r.podcast) return showHelp(r, s);
   if (UNDO_CHANGES.test(r.goal.trim())) return undoChanges(r);
+  // Before the clipboard is read for "…clipboard" requests: this one writes to it.
+  if (COPY_SECRET.test(r.goal) && !/\b(response|request) headers\b|\bcurl\b/i.test(r.goal)) return copySecret(r);
   if (CLIPBOARD.test(r.goal)) {
     await useClipboard(r);
     // Clear-cut wordings don't need the decision model (or a readable page).
@@ -360,6 +370,13 @@ async function agentLoop(r) {
   const tab0 = await chrome.tabs.get(r.tabId);
   r.pdf = await pdfFor(tab0, (f, a) => inject(r.tabId, f, a)).catch((e) => { throw new Error(`This looks like a PDF, but ${e.message.replace(/^./, (c) => c.toLowerCase())}`); });
   r.url = tab0.url || "";
+  // Developer tools: run JavaScript in the page, or answer from its network requests.
+  if (!r.read && !r.podcast && !r.pdf) {
+    const goal = r.goal.trim();
+    if (RUN_JS.test(goal) || (/^(please )?(run|execute|eval(uate)?)\b/i.test(goal) && codeIn(goal))) return runJavaScript(r, s);
+    if (DATA_SOURCE.test(goal)) return dataSourceAnswer(r, s);
+    if (NETWORK.test(goal) && !r.selection) return networkAnswer(r, s);
+  }
   if (TRANSLATE_PAGE.test(r.goal.trim()) && !TRANSLATE_PART.test(r.goal) && !r.selection && !r.pdf && !r.read && !r.podcast) return translatePage(r, s);
   if (!r.read && !r.podcast) {
     const goal = r.goal.trim();
@@ -566,8 +583,9 @@ async function agentLoop(r) {
     if (step.type !== "scroll_down" && step.type !== "scroll_up") scrolls = 0;
     waits = 0;
 
-    // Loop guard: the same step three times means we're stuck.
-    const key = `${snap.url}|${step.type}|${step.id ? els[step.id].desc : ""}|${step.text ?? step.value ?? step.url ?? ""}`;
+    // Loop guard: the same step three times on the same page means we're stuck. The visible text
+    // counts as the page, so "Next" in an app whose URL doesn't change (page 1, 2, 3…) isn't a repeat.
+    const key = `${snap.url}|${textHash(snap.text)}|${step.type}|${step.id ? els[step.id].desc : ""}|${step.text ?? step.value ?? step.url ?? ""}`;
     if (keys.filter((k) => k === key).length >= 2) return finish("stopped", `Stuck repeating: ${step.label}.`);
     keys.push(key);
 
@@ -980,6 +998,258 @@ async function readerMode(r) {
   if (res?.closed) return finish("done", "Reader view closed.");
   if (off) return finish("done", "Reader view wasn't open on this page.");
   finish("stopped", "Couldn't find an article on this page to show in reader view.");
+}
+
+// ---------- developer tools (network.js, devtools.js) ----------
+const DEVTOOLS_HINT = "Open DevTools on this tab (⌥⌘I on a Mac, Ctrl+Shift+I elsewhere) and ask again. If it was already open, close and reopen it once after installing or updating Docent.";
+
+// "Run `document.title`", "use JavaScript to count the table rows", or selected code: "run this".
+async function runJavaScript(r, s) {
+  r.kind = "javascript";
+  log("info", `Goal: ${r.goal}`);
+  const llm = lkConfigured(s) ? s : null;
+  let code = codeIn(r.goal) || (r.selection && /\b(selected|selection|this|that|it|clipboard|copied)\b/i.test(r.goal) ? r.selection : "");
+  if (!code) {
+    if (!llm) return finish("stopped", "Put the code in backticks, e.g. run `document.title`. Writing code from a description needs a text model: add your LiveKit URL, key and secret in Settings.");
+    const tab = await chrome.tabs.get(r.tabId);
+    const sk = await inject(r.tabId, pageSkeleton, [7000]).catch(() => null);
+    const model = llm.lkModel || DEFAULT_MODEL;
+    log("info", `Asking ${model} to write the code…`);
+    code = (await chat(llm, [
+      { role: "system", content: CODE_PROMPT },
+      { role: "user", content: `Page title: ${tab.title}\nURL: ${tab.url}\n\nPage structure (CSS selectors with sample text):\n${sk?.skeleton || "(not available)"}\n\nRequest: ${r.goal}` },
+    ], { signal: r.abort.signal, maxTokens: 1200 })).replace(/^\s*```\w*\n?|```\s*$/g, "").trim();
+    if (!code) return finish("error", "The text model didn't write any code.");
+    log("info", "Code written:", code);
+    // Code Docent wrote runs only once you've read it.
+    if (!(await askUser(r, `Run this code on the page?\n\n${code}`))) return finish("stopped", "Not run.");
+  }
+  log("info", "Running the code…", code.length > 300 ? code.slice(0, 297) + "…" : code);
+  const res = await runCode(r.tabId, code, inject).catch((e) => ({ error: `Can't run code on this page (${e.message}). Chrome blocks extensions on chrome:// pages, the Web Store and some viewers.` }));
+  const where = res.via === "devtools" ? "through DevTools, like the Console" : "in the page";
+  if (res.csp) return finish("stopped", `This page's security policy blocks running code from an extension. ${DEVTOOLS_HINT} Docent then runs it the way the Console does.`);
+  if (res.error) {
+    r.answer = { text: res.error.slice(0, 4000), note: `The code threw an error (run ${where}).`, items: [], long: true };
+    return finish("done", "The code threw an error.");
+  }
+  r.answer = { text: res.result ?? "undefined", note: `Result of running the code ${where}.${res.note ? ` ${res.note}` : ""}`, items: [], long: true };
+  log("answer", r.answer.text.length > 140 ? r.answer.text.slice(0, 137) + "…" : r.answer.text);
+  finish("done", "Ran the code.");
+}
+
+// "Copy the authorization token to the clipboard", "put the session_id cookie on the clipboard",
+// "copy all cookies": copied as `export NAME='value'` to paste into a terminal (or just the value).
+// The value is never shown, logged or sent to a model.
+async function copySecret(r) {
+  r.kind = "secret";
+  log("info", `Goal: ${r.goal}`);
+  const tab = await chrome.tabs.get(r.tabId);
+  let url;
+  try { url = new URL(tab.url); } catch (_) { return finish("stopped", "This tab has no web address to read cookies for."); }
+  if (!/^https?:$/.test(url.protocol)) return finish("stopped", "Cookies and headers can only be read on web pages.");
+  // Cookies sent to this page, plus the rest of the site's (an API on a subdomain may use those).
+  const base = url.hostname.split(".").slice(-2).join(".");
+  const forPage = await chrome.cookies.getAll({ url: tab.url });
+  const seen = new Set(forPage.map((c) => `${c.domain}|${c.path}|${c.name}`));
+  const site = [...forPage, ...(await chrome.cookies.getAll({ domain: base })).filter((c) => !seen.has(`${c.domain}|${c.path}|${c.name}`))];
+
+  const goal = r.goal;
+  let pick = null; // { what, name, value, from }
+  // "the csrf token": a cookie such as XSRF-TOKEN or csrftoken.
+  const csrf = (goal.match(/\b(csrf|xsrf)\b/i) || [])[1];
+  const named = cookieIn(goal, site) || (csrf && !/\bheader\b/i.test(goal) ? site.find((c) => /csrf|xsrf/i.test(c.name)) : null);
+  if (named) {
+    pick = { what: `the ${named.name} cookie`, name: shellName(named.name), value: named.value, from: named.domain };
+  } else if (/\bcookie/i.test(goal) && ALL_COOKIES.test(goal) && !AUTH_ASK.test(goal)) {
+    if (!forPage.length) return finish("stopped", `${url.hostname} has no cookies set.`);
+    pick = { what: `all ${forPage.length} cookies for ${url.hostname}, as a Cookie header`, name: "COOKIE", value: forPage.map((c) => `${c.name}=${c.value}`).join("; ") };
+  } else if (/\bheader\b/i.test(goal) || AUTH_ASK.test(goal)) {
+    let name = headerIn(goal);
+    if (name === "authorization" && /\bapi[- ]?key\b/i.test(goal)) name = "x-api-key";
+    if (name === "authorization" && csrf) name = `x-${csrf.toLowerCase()}-token`;
+    if (await devtoolsOpen(r.tabId)) {
+      const h = await devtoolsCall(r.tabId, "header", { name, pageUrl: tab.url }).catch(() => ({}));
+      if (h.value) {
+        const auth = name.toLowerCase() === "authorization";
+        const scheme = auth ? (h.value.match(/^(\w+)\s+/) || [])[1] : "";
+        pick = { what: auth ? `the Authorization ${scheme ? `${scheme} token` : "header"}` : `the ${name} header`, name: auth ? "TOKEN" : shellName(name), value: scheme ? h.value.slice(scheme.length).trim() : h.value, from: new URL(h.url).host };
+        if (scheme) pick.note = ` In curl: -H "Authorization: ${scheme} $TOKEN".`;
+      }
+    }
+    // No such header recorded: the login may be a cookie instead.
+    if (!pick && name.toLowerCase() === "authorization") {
+      const c = loginCookie(site);
+      if (c) pick = { what: `the ${c.name} cookie (no Authorization header was ${(await devtoolsOpen(r.tabId)) ? "recorded" : "available without DevTools"}; this looks like the login cookie)`, name: shellName(c.name), value: c.value, from: c.domain };
+    }
+    if (!pick) {
+      r.answer = { text: `Couldn't find the ${name} header`, note: `Headers come from DevTools' Network panel: ${DEVTOOLS_HINT} Reload the page so requests are recorded.${site.length ? " Or name one of this site's cookies:" : ""}`, items: site.map((c) => ({ text: c.name })) };
+      return finish("stopped", `No ${name} header found.`);
+    }
+  } else {
+    r.answer = { text: "Which cookie?", note: `Ask for one by name, e.g. "copy the ${site[0]?.name || "session"} cookie to the clipboard", or "copy all cookies". This site's cookies:`, items: site.map((c) => ({ text: `${c.name}  (${c.domain}${c.httpOnly ? ", HttpOnly" : ""})` })) };
+    return finish("stopped", site.length ? "No cookie by that name." : `${url.hostname} has no cookies set.`);
+  }
+
+  const varName = variableIn(goal) || pick.name;
+  const raw = RAW_VALUE.test(goal);
+  await voice.ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({ target: "offscreen", type: "clipboard:write", text: raw ? pick.value : exportLine(varName, pick.value) });
+  if (!res?.ok) throw new Error(res?.error || "Couldn't write to the clipboard.");
+  r.answer = {
+    text: raw ? `Copied ${pick.what}` : `Copied ${pick.what} as $${varName}`,
+    note: `${raw ? "Just the value is on the clipboard." : `Paste it into your terminal to set $${varName}.`}${pick.note || ""} ${pick.value.length} characters${pick.from ? `, from ${pick.from}` : ""}. The value isn't shown here or sent to any model; it stays on the clipboard until you copy something else.`,
+    items: [],
+  };
+  finish("done", "Copied to the clipboard.");
+}
+const AUTH_ASK = /\b(authori[sz]ation|auth|bearer|tokens?|jwt|api[- ]?key|csrf|xsrf)\b/i;
+
+// "What API is used for the data in this table?": the values shown in the table (or the selected
+// text) are looked for in every response body; the one holding most of them is the source.
+// Found by exact matching in code, so it needs no model.
+async function dataSourceAnswer(r, s) {
+  r.kind = "network";
+  log("info", `Goal: ${r.goal}`);
+  if (!(await devtoolsOpen(r.tabId))) return finish("stopped", `Finding where the data came from needs the response bodies in DevTools' Network panel. ${DEVTOOLS_HINT} Reload the page with DevTools open so the requests are recorded.`);
+  let values, headers = [];
+  if (r.selection) {
+    values = [...new Set(r.selection.split(/[\n\t]+/).map((x) => x.trim()).filter((x) => x.length >= 2 && x.length <= 200))].slice(0, 150).map((text) => ({ text, column: -1 }));
+    log("info", `Looking for ${values.length} values from the ${fromClipboard(r) ? "clipboard" : "selected text"}.`);
+  } else {
+    const t = await inject(r.tabId, tableValues, [40, 300]).catch(() => null);
+    if (!t?.values?.length) return finish("stopped", "Couldn't find a table or list on this page to trace. Select some of its text and ask again.");
+    ({ values, headers } = t);
+    log("info", `Read ${values.length} values from ${t.rows} rows of the table on the page.`, values.slice(0, 8).map((v) => v.text).join(" · "));
+  }
+  const { entries } = await devtoolsCall(r.tabId, "entries");
+  log("info", `Looking for them in ${entries.length} recorded responses…`);
+  const { results, total } = await devtoolsCall(r.tabId, "provenance", { values: values.map((v) => v.text) }, 120000);
+  if (!results?.length) {
+    return finish("done", "None of the recorded responses contain the values shown. If the data loaded before DevTools was opened, reload the page with DevTools open and ask again. It may also have come over a WebSocket, or been built in the page from other data.");
+  }
+  const top = results[0];
+  const [detail] = (await devtoolsCall(r.tabId, "details", { ids: [top.id], max: 20000 })).details || [];
+  const pct = Math.round((top.matched / total) * 100);
+  const path = (u) => { try { const x = new URL(u); return x.host + x.pathname; } catch (_) { return u; } };
+
+  // Each column's field: the path most of that column's values were found at.
+  const columns = [];
+  if (top.fields) {
+    // A grid built from divs has no <th>: a first row that matched nothing is its header row.
+    if (!headers.length && values.some((v) => v.row > 0 && top.fields[v.text]) && !values.some((v) => v.row === 0 && top.fields[v.text])) {
+      for (const v of values) if (v.row === 0) headers[v.column] = v.text;
+    }
+    const byColumn = new Map();
+    for (const v of values) {
+      const f = top.fields[v.text];
+      if (!f) continue;
+      const counts = byColumn.get(v.column) || {};
+      counts[f] = (counts[f] || 0) + 1;
+      byColumn.set(v.column, counts);
+    }
+    const list = top.list?.path || "";
+    for (const [col, counts] of [...byColumn].sort((a, b) => a[0] - b[0])) {
+      const field = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+      const name = col >= 0 ? headers[col] || `Column ${col + 1}` : "Value";
+      columns.push(`- ${name} → ${list && field.startsWith(list) ? field.slice(list.length).replace(/^\./, "") || "(the item itself)" : field}`);
+    }
+  }
+  const lines = [
+    `${top.method} ${top.status} ${top.url}`,
+    "",
+    `Holds ${top.matched} of the ${total} values shown (${pct}%).${top.type ? ` Type: ${top.type}${top.mime ? `, ${top.mime}` : ""}.` : ""}`,
+    ...(top.list ? [`The rows come from ${top.list.path || "the top-level list"} (${top.list.length} item${top.list.length === 1 ? "" : "s"} in this response).`] : []),
+    ...(columns.length ? ["", "Columns:", ...columns] : []),
+    ...(detail ? ["", "To fetch it from the command line:", curlFor(detail)] : []),
+  ];
+  const others = results.slice(1).filter((x) => x.matched >= Math.max(2, top.matched * 0.2));
+  r.answer = {
+    text: lines.join("\n"),
+    note: `Found by matching the page's values against every recorded response body (no model involved).${detail && /\$(TOKEN|COOKIE)/.test(lines.join(" ")) ? " $TOKEN and $COOKIE stand for your login: set them, or right-click the request in DevTools → Copy → Copy as cURL for a ready-made command." : ""}`,
+    items: others.map((x) => ({ text: `Also has ${x.matched}: ${x.method} ${path(x.url)}` })),
+    long: true,
+  };
+  log("answer", `${top.method} ${path(top.url)}: ${top.matched} of ${total} values`);
+  finish("done", "Found the source.");
+}
+
+// "Which API call returns the emails?", "what failed in the network tab?", "show the headers sent to /login".
+async function networkAnswer(r, s) {
+  r.kind = "network";
+  log("info", `Goal: ${r.goal}`);
+  const llm = lkConfigured(s) ? s : null;
+  const tab = await chrome.tabs.get(r.tabId);
+  const dt = await devtoolsOpen(r.tabId);
+  let entries;
+  if (dt) {
+    entries = (await devtoolsCall(r.tabId, "entries")).entries;
+    log("info", `Read ${entries.length} request${entries.length === 1 ? "" : "s"} from the DevTools Network panel.`);
+  } else {
+    entries = await inject(r.tabId, pageResources, []).catch(() => null);
+    if (!entries) throw new Error("Can't read this page's requests. Chrome blocks extensions on chrome:// pages, the Web Store and some viewers.");
+    log("warn", "DevTools isn't open on this tab, so only the URLs, sizes and timings the page records are available (no headers or response bodies).", DEVTOOLS_HINT);
+  }
+  if (!entries.length) return finish("done", dt ? "The Network panel has no requests. Reload the page with DevTools open to record them." : "The page hasn't recorded any requests.");
+
+  // Which responses (or, without DevTools, URLs) mention the words asked about.
+  const terms = searchTerms(r.goal);
+  let hits = {};
+  if (terms.length && dt) {
+    hits = (await devtoolsCall(r.tabId, "search", { terms })).hits || {};
+    log("info", `Looked for ${terms.map((t) => `"${t}"`).join(", ")} in the responses: ${Object.keys(hits).length} match.`);
+  } else if (terms.length) {
+    for (const e of entries) {
+      const counts = Object.fromEntries(terms.filter((t) => e.url.toLowerCase().includes(t)).map((t) => [t, 1]));
+      if (Object.keys(counts).length) hits[e.id] = { counts };
+    }
+  }
+  const includeStatic = /\b(images?|fonts?|css|stylesheets?|media|static|assets?|scripts?)\b/i.test(r.goal);
+  const lines = requestLines(entries, hits, { includeStatic, max: 250 });
+  const byId = Object.fromEntries(entries.map((e) => [e.id, e]));
+
+  if (!llm) {
+    const matched = entries.filter((e) => hits[e.id]);
+    const show = (matched.length ? matched : entries.filter((e) => /^(xhr|fetch)$/.test(e.type))).slice(-40);
+    r.answer = {
+      text: matched.length ? `${matched.length} request${matched.length === 1 ? "" : "s"} mention ${terms.join(", ")}` : `${show.length} API request${show.length === 1 ? "" : "s"}`,
+      note: "Answering questions about the requests needs a text model: add your LiveKit URL, key and secret in Settings. Without one, Docent lists the requests that mention your words.",
+      items: show.map((e) => ({ text: `${e.method || ""} ${e.status || ""} ${e.url}`.trim() })),
+    };
+    return finish("done", "Listed the requests.");
+  }
+
+  const model = llm.lkModel || DEFAULT_MODEL;
+  const head = `Page title: ${tab.title}\nURL: ${tab.url}\n\nRequests (${lines.length} of ${entries.length}; id method status type mime size time url):\n${lines.join("\n")}`;
+  let opened = [];
+  if (dt) {
+    log("info", `Asking ${model} which requests to open…`);
+    const ids = parseIds(await chat(llm, [
+      { role: "system", content: PICK_PROMPT },
+      { role: "user", content: `${head}\n\nQuestion: ${r.goal}` },
+    ], { signal: r.abort.signal, maxTokens: 200 }));
+    if (ids.length) {
+      opened = (await devtoolsCall(r.tabId, "details", { ids, max: 400000 })).details || [];
+      log("info", `Opened ${opened.length} request${opened.length === 1 ? "" : "s"}.`, opened.map((d) => `${d.id} ${d.method} ${d.url.slice(0, 120)}`).join("\n"));
+    }
+  }
+  const details = opened.length ? detailText(opened, Math.floor(48000 / opened.length)) : "";
+
+  r.answer = { text: "", note: `Written by ${model} from ${dt ? "the DevTools Network panel" : "the page's list of loaded resources"}. Authorization and cookie values aren't sent to the model.`, items: [], long: true };
+  log("info", `Asking ${model}…`);
+  let last = 0;
+  const text = await chat(llm, [
+    { role: "system", content: ANSWER_PROMPT + (dt ? "" : " Only URLs, sizes, timings and (sometimes) status codes are available: no headers, methods or bodies. If the question needs those, say to open DevTools on the tab and ask again.") },
+    ...(r.history?.length ? [{ role: "system", content: `Conversation so far (for context):\n${r.history.map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`).join("\n")}` }] : []),
+    { role: "user", content: `${head}${details ? `\n\nRequest details:\n${details}` : ""}\n\nQuestion: ${r.goal}` },
+  ], {
+    signal: r.abort.signal,
+    maxTokens: 2000,
+    onDelta: (t) => { r.answer.text = t; if (Date.now() - last > 150) { last = Date.now(); publish(); } },
+  });
+  r.answer.text = text.trim() || "(the model returned nothing)";
+  r.answer.items = opened.map((d) => ({ text: `${d.id} ${d.method} ${d.status} ${byId[d.id]?.url || d.url}` }));
+  log("answer", r.answer.text.length > 140 ? r.answer.text.slice(0, 137) + "…" : r.answer.text, r.answer.note);
+  finish("done", "Answered.");
 }
 
 // "Define ephemeral", "what does amortize mean here?", or Define "…" in the right-click menu.
@@ -1440,6 +1710,8 @@ const SUGGEST = {
   task: ["Summarize this page", "What can I do on this page?", "Reader view"],
   reader: ["Exit reader view", "Summarize this page", "podcast"],
   change: ["Undo page changes", "Summarize this page", "read"],
+  network: ["Which requests failed?", "Which requests were the slowest?", "What API endpoints does this page call?"],
+  javascript: ["Which requests failed?", "Summarize this page"],
   translate: ["Undo page changes", "Summarize this page", "podcast"],
   default: ["Summarize this page", "podcast", "read", "Reader view"],
 };
@@ -1802,6 +2074,7 @@ async function settle(tabId, timeoutMs = 15000) {
   }
 }
 
+const textHash = (t = "") => { let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return h; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pct = (x) => `${Math.round((x ?? 0) * 100)}%`;
 function topN(probs, n, els) {

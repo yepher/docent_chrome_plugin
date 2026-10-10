@@ -89,6 +89,10 @@ Type these in the box and press **Run** (or ⌘/Ctrl+Enter), or say them with �
 | `Reader view` | Shows just the article, without the clutter; Esc or `Exit reader view` closes it |
 | `Explain this simply` | Answers in plain everyday words, explaining the jargon |
 | `Define ephemeral` | Says what the word means as it's used on this page; or select a word, right-click, **Define** |
+| `What API is used for the data in this table?` | With DevTools open, finds the response the table's values came from, which JSON field fills each column, and a curl command to fetch it |
+| `Copy the authorization token to the clipboard` | Copies `export TOKEN='…'` to paste into a terminal; `Copy the session_id cookie` or `Copy all cookies` work the same way, and the value is never shown or sent to a model |
+| `Which API call returns the emails?` | With DevTools open on the tab, looks through the Network panel, response bodies included, and answers |
+| ``Run `document.querySelectorAll('tr').length` `` | Runs JavaScript in the page like the Console and shows the result; `Use JavaScript to …` has the text model write the code, which you OK first |
 | `Search for mechanical keyboards and open the first result` | Clicks and types for you, asking before anything risky |
 
 Press **Alt+Shift+J** for a hands-free conversation: ask one thing after another, talk over Docent to interrupt, and say "goodbye" to finish.

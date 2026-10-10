@@ -440,10 +440,24 @@ function clipboardRead() {
   return ok ? { text } : { error: "Chrome didn't allow reading the clipboard." };
 }
 
+function clipboardWrite(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  return ok ? { ok: true } : { error: "Chrome didn't allow writing to the clipboard." };
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== "offscreen") return;
   if (msg.type === "clipboard:read") {
     sendResponse(clipboardRead());
+    return;
+  }
+  if (msg.type === "clipboard:write") {
+    sendResponse(clipboardWrite(msg.text || ""));
     return;
   }
   if (msg.type === "pdf:extract") {
