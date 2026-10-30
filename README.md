@@ -81,19 +81,19 @@ When you choose *This computer*, Docent checks your GPU, memory and disk space b
 
 It covers everything the text model writes: summaries, open questions, composing, translating and changing the page. If WebGPU isn't available, or the model can't load, Docent says so and doesn't fall back to LiveKit.
 
-It can also speak and listen. Under *Voice*, *Speech runs on* defaults to **This computer**, with a female or male voice, for voice questions, hands-free conversation, reading aloud and podcasts. This downloads about 1 GB more the first time you use voice. It's less expressive than the LiveKit voices, and Settings shows how fast your computer speaks: under 1× real time, speech pauses while it catches up. Choose **LiveKit Inference** there to keep the LiveKit voices with the text model on your computer. Your voice and what Docent says then go to LiveKit.
+It can also speak and listen. This is experimental. Under *Voice*, *Speech runs on* defaults to **This computer**, with a female or male voice, for voice questions, hands-free conversation, reading aloud and podcasts. This downloads about 1 GB more the first time you use voice. It's less expressive than the LiveKit voices, and Settings shows how fast your computer speaks: under 1× real time, speech pauses while it catches up. Choose **LiveKit Inference** there to keep the LiveKit voices with the text model on your computer. Your voice and what Docent says then go to LiveKit.
 
 **Jev still sends page details to TypeSafe.** Choose Laya as the decision model, with both text and speech on this computer, to keep everything in your browser.
 
 Compared with LiveKit, speech on your computer has these limits:
 
 - **Voices:** one female and one male voice, with no emotion or pauses in podcasts.
-- **Languages:** speech works in 18 languages. Anything else is spoken as American English.
+- **Languages:** Docent can speak 18 languages, and anything else is spoken as American English. Voice input is English only.
 - **Interrupting:** Docent stops after you pause, not as you start talking, and there's no live text while you speak.
 - **Spoken answers:** speech starts once the written answer is finished.
 - **Download and start-up:** the first use of voice downloads about 1 GB more (2.4 GB in all). After each browser restart, it takes about 10 seconds to load on an Apple M4.
 - **Speed:** an Apple M4 with 16 GB of memory speaks at about 1.2 to 1.4× real time, so slower computers may fall behind. Settings shows your speed and warns you if it's under 1×.
-- **Testing so far:** it has been tested on that M4 with recorded audio only, not with a person talking in a room. Background noise and sound from your speakers reaching the mic are untested, and the memory limits don't yet account for the speech models.
+- **Testing so far:** it has only been tested lightly, on one computer. Long sessions, noisy rooms and sound from your speakers reaching the mic need more testing, and the memory limits don't yet account for the speech models.
 
 Expect it to be slower and less accurate than the cloud models, and to state things that aren't true with confidence. The model is under Liquid AI's [LFM Open License](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX/blob/main/LICENSE), which doesn't cover commercial use by organizations with $10 million or more in annual revenue.
 

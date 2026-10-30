@@ -207,9 +207,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await (voice.state.paused ? voice.resumeSpeaking() : voice.pauseSpeaking());
         return { ...voice.state };
       case "voice:speakText": {
-        const s = await loadSettings();
+        // Settings can preview unsaved choices (where speech runs, a voice, the pronunciation list).
+        const s = { ...(await loadSettings()), ...(msg.settings || {}) };
         if (!voiceReady(s)) return { error: "Set up voice in Settings." };
-        // Settings can preview unsaved choices (a voice, the pronunciation list).
         await voice.speak({ ...s, ...(msg.ttsVoice ? { ttsVoice: msg.ttsVoice } : {}), ...(msg.pronunciations != null ? { pronunciations: msg.pronunciations } : {}) }, msg.text);
         return { ...voice.state };
       }

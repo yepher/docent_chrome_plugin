@@ -190,9 +190,9 @@ $("textProvider").onchange = showTextProvider;
 $("voiceProvider").onchange = () => { showVoiceFields(); refreshLfm(); };
 for (const id of ["lkUrl", "lkApiKey", "lkApiSecret"]) $(id).oninput = showVoiceFields;
 $("lfmPreview").onclick = async () => {
-  await chrome.storage.local.set(readForm()); // the service worker reads saved settings
   lfmText("Getting ready to speak…");
-  const r = await send({ type: "voice:speakText", ttsVoice: localVoiceId($("lfmVoice").value), text: "Hi, I'm Docent. This is how I sound." });
+  const { textProvider, voiceProvider } = readForm();
+  const r = await send({ type: "voice:speakText", settings: { textProvider, voiceProvider }, ttsVoice: localVoiceId($("lfmVoice").value), text: "Hi, I'm Docent. This is how I sound." });
   if (r?.error) lfmText(r.error, "err"); else refreshLfm();
 };
 function lfmText(text, cls = "") { $("lfmStatus").textContent = text; $("lfmStatus").className = "help " + cls; }
