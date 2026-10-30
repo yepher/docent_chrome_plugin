@@ -8,7 +8,7 @@ export async function ensureOffscreen() {
     await chrome.offscreen.createDocument({
       url: "offscreen.html",
       reasons: ["AUDIO_PLAYBACK", "USER_MEDIA", "WORKERS", "CLIPBOARD"],
-      justification: "Play LiveKit Inference text-to-speech, capture the microphone for voice questions, run the in-browser Laya and LFM3-Omni models in workers, and read or write the clipboard when you ask.",
+      justification: "Play text-to-speech, capture the microphone for voice questions, run the in-browser Laya and LFM3-Omni models in workers, and read or write the clipboard when you ask.",
     });
   } catch (e) {
     if (!/single offscreen|already/i.test(e.message)) throw e;

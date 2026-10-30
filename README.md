@@ -81,10 +81,9 @@ When you choose *This computer*, Docent checks your GPU, memory and disk space b
 
 It covers everything the text model writes: summaries, open questions, composing, translating and changing the page. If WebGPU isn't available, or the model can't load, Docent says so and doesn't fall back to LiveKit.
 
-It only replaces the text model, so two things can still leave your computer:
+It can also speak and listen. Under *Voice*, *Speech runs on* defaults to **This computer**, with a female or male voice, for voice questions, hands-free conversation, reading aloud and podcasts. This downloads about 1 GB more the first time you use voice. It's less expressive than the LiveKit voices, and Settings shows how fast your computer speaks: under 1× real time, speech pauses while it catches up. Choose **LiveKit Inference** there to keep the LiveKit voices with the text model on your computer. Your voice and what Docent says then go to LiveKit.
 
-- **Speech always uses LiveKit.** Docent has no on-device text-to-speech or speech-to-text, whichever text model you pick. Without a LiveKit key, voice, hands-free conversation, reading aloud and podcasts are off. With one, your voice and everything Docent says, including page text it reads aloud, goes to LiveKit. In Settings, the LiveKit key moves to the *Voice* section when you choose *This computer*.
-- **Jev still sends page details to TypeSafe.** Choose Laya as the decision model to keep those on your computer too.
+**Jev still sends page details to TypeSafe.** Choose Laya as the decision model, with both text and speech on this computer, to keep everything in your browser.
 
 Expect it to be slower and less accurate than the cloud models, and to state things that aren't true with confidence. The model is under Liquid AI's [LFM Open License](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX/blob/main/LICENSE), which doesn't cover commercial use by organizations with $10 million or more in annual revenue.
 

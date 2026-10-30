@@ -17,7 +17,7 @@ import { supportsExpressive, strip as stripExpr } from "./expressive.js";
 import { prepareReadAlong, highlightSentence, clearReadAlong, nextReadingChunk, loadMoreBelow } from "./karaoke.js";
 import { podcastSource, showPodcastRefs, clearPodcastRefs } from "./podsource.js";
 import { pdfFor, pdfText, pdfChunks, pdfNumbered, endOfBody, bodyStart, goToPage } from "./pdfdoc.js";
-import { chat, lkConfigured, textReady, textModelName, isLfm, DEFAULT_MODEL } from "./lk.js";
+import { chat, voiceReady, isLocalVoice, textReady, textModelName, isLfm, DEFAULT_MODEL } from "./lk.js";
 import { lfmLoad, lfmStatus } from "./lfm.js";
 import { focusRef, clearMarks, getSelectionText } from "./items.js";
 import { pickTarget as pickTargetFromOutline } from "./targets.js";
@@ -43,6 +43,8 @@ export const DEFAULTS = {
   confirmRisky: true,
   // Optional text model: LiveKit Inference, or LFM3-Omni on this computer
   textProvider: "livekit", // livekit | lfm
+  voiceProvider: "lfm",    // with LFM3-Omni as the text model: lfm | livekit (LiveKit text always means LiveKit voice)
+  lfmVoice: "female",      // female | male
   lkUrl: "",
   lkApiKey: "",
   lkApiSecret: "",
@@ -137,12 +139,12 @@ Talk hands-free (Alt+Shift+J)
 - "stop", "continue", "repeat that", "goodbye"
 
 Keys: Alt+J opens Docent, Alt+Shift+P pauses or resumes speech, ■ stops.
-Settings (⚙): the decision model (Jev with a TypeSafe key, or Laya in your browser) a text model for summaries (LiveKit, or LFM3-Omni on this computer) and LiveKit for voice and podcasts.`;
+Settings (⚙): the decision model (Jev with a TypeSafe key, or Laya in your browser) a text model and voice, with LiveKit or LFM3-Omni on this computer.`;
 const HELP_SPOKEN = "You can ask me questions about the page, or ask me to summarize it, read it aloud, or make it a podcast. I can highlight or hide things by meaning, change how the page looks, click and type for you, and read or summarize your clipboard. Say stop, continue or repeat that while I'm talking, and goodbye to finish. The full list is in the panel.";
 function showHelp(r, s) {
   r.kind = "help";
   r.answer = { text: HELP_TEXT, note: "", items: [], long: true, spoken: true };
-  if (r.speak && lkConfigured(s)) voice.speak(s, HELP_SPOKEN).catch((e) => log("warn", `Voice: ${e.message}`));
+  if (r.speak && voiceReady(s)) voice.speak(s, HELP_SPOKEN).catch((e) => log("warn", `Voice: ${e.message}`));
   finish("done", "Here's how to use Docent.");
 }
 
@@ -206,14 +208,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ...voice.state };
       case "voice:speakText": {
         const s = await loadSettings();
-        if (!lkConfigured(s)) return { error: "Set up LiveKit in Settings to use voice." };
+        if (!voiceReady(s)) return { error: "Set up voice in Settings." };
         // Settings can preview unsaved choices (a voice, the pronunciation list).
         await voice.speak({ ...s, ...(msg.ttsVoice ? { ttsVoice: msg.ttsVoice } : {}), ...(msg.pronunciations != null ? { pronunciations: msg.pronunciations } : {}) }, msg.text);
         return { ...voice.state };
       }
       case "voice:listen": {
         const s = await loadSettings();
-        if (!lkConfigured(s)) return { error: "Set up LiveKit in Settings to use voice." };
+        if (!voiceReady(s)) return { error: "Set up voice in Settings." };
         await voice.stopSpeaking();
         voice.state.listenFor = { tabId: msg.tabId, selection: msg.selection || "" };
         await voice.startListening(s);
@@ -225,7 +227,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // ---- conversation (hands-free) ----
       case "conv:start": {
         const s = await loadSettings();
-        if (!lkConfigured(s)) return { error: "Conversation uses LiveKit Inference. Add your LiveKit URL, key and secret in Settings." };
+        if (!voiceReady(s)) return { error: "Conversation needs voice. Set it up in Settings." };
         return convo.start();
       }
       case "conv:end":
@@ -322,7 +324,7 @@ function finish(status, text) {
   clearInterval(run.keepAlive);
   log(status === "done" ? "done" : status === "error" ? "error" : "warn", text);
   // Voice replies: speak the answer (or the outcome) unless it was already streamed.
-  if (run.speak && run.settings && lkConfigured(run.settings) && !run.answer?.spoken) {
+  if (run.speak && run.settings && voiceReady(run.settings) && !run.answer?.spoken) {
     const said = run.answer ? spokenAnswer(run.answer) : text;
     if (said) voice.speak(run.settings, said).catch((e) => log("warn", `Voice: ${e.message}`));
   }
@@ -352,9 +354,10 @@ async function startRun(goal, tabId, selection, opts = {}) {
 async function agentLoop(r) {
   const s = await loadSettings();
   r.settings = s;
-  if (s.speakAnswers && lkConfigured(s)) r.speak = true;
+  if (s.speakAnswers && voiceReady(s)) r.speak = true;
   if (HELP.test(r.goal.trim()) && !r.read && !r.podcast) return showHelp(r, s);
-  if (isLfm(s) && !r.read) await ensureLfm(r);
+  if (isLfm(s) && !r.read) await ensureLfm(r, isLocalVoice(s) && (r.speak || r.podcast));
+  if (r.read && isLocalVoice(s)) await ensureLfm(r, true);
   if (UNDO_CHANGES.test(r.goal.trim())) return undoChanges(r);
   // Before the clipboard is read for "…clipboard" requests: this one writes to it.
   if (COPY_SECRET.test(r.goal) && !/\b(response|request) headers\b|\bcurl\b/i.test(r.goal)) return copySecret(r);
@@ -398,7 +401,7 @@ async function agentLoop(r) {
   }
   if (r.pdf) log("info", `PDF: "${r.pdf.title.slice(0, 80)}", ${r.pdf.numPages} page${r.pdf.numPages === 1 ? "" : "s"}, ${r.pdf.paras.length} paragraphs.`, r.pdf.pagesRead < r.pdf.numPages ? `Read the first ${r.pdf.pagesRead} pages.` : "Read with pdf.js.");
   if (r.read) {
-    if (!lkConfigured(s)) throw new Error("Reading aloud uses LiveKit Inference TTS. Add your LiveKit URL, key and secret in Settings.");
+    if (!voiceReady(s)) throw new Error("Reading aloud needs voice. Set it up in Settings.");
     return readAloud(r, s);
   }
   if (r.podcast) return makePodcast(r, s);
@@ -752,15 +755,16 @@ async function ensureLaya(r, s) {
   }
 }
 // LFM3-Omni: the same, except that Stop works during the long first download.
-async function ensureLfm(r) {
+async function ensureLfm(r, withVoice) {
   const st = await lfmStatus().catch(() => null);
-  if (st?.info) return;
-  log("info", "Loading LFM3-Omni, the text model on this computer…", "The first time, this downloads the model once (about 1.4 GB). After that it loads from the browser's cache.");
+  if (st?.info && (!withVoice || st.info.speechSpeed)) return;
+  log("info", "Loading LFM3-Omni, the model on this computer…", `The first time, this downloads the model once (about ${withVoice ? "2.4" : "1.4"} GB). After that it loads from the browser's cache.`);
   modelProgressEntry = r.log.at(-1);
   const stopped = new Promise((_, reject) => r.abort.signal.addEventListener("abort", () => reject(new DOMException("Stopped", "AbortError")), { once: true }));
   try {
-    const info = await Promise.race([lfmLoad(), stopped]);
+    const info = await Promise.race([lfmLoad({ voice: withVoice }), stopped]);
     modelProgressEntry.text = `LFM3-Omni ready: ${Math.round(info.loadMs / 1000)} s to load.`;
+    if (withVoice && info.speechSpeed < 1) log("warn", `This computer speaks at ${info.speechSpeed}× real time, so speech will pause while it catches up.`);
     modelProgressEntry.detail = undefined;
     publish();
   } finally {
@@ -1634,7 +1638,7 @@ async function downloadPodcast() {
 }
 
 async function makePodcast(r, s) {
-  if (!lkConfigured(s)) throw new Error("Podcast mode uses LiveKit Inference (text model and voices). Add your LiveKit URL, key and secret in Settings.");
+  if (!textReady(s) || !voiceReady(s)) throw new Error("Podcast mode needs a text model and voice. Set them up in Settings.");
   r.kind = "podcast";
   const tab = await chrome.tabs.get(r.tabId);
   let title = tab.title, text, what, cited = false, pdfPages = null;
@@ -1909,7 +1913,7 @@ async function writtenAnswer(r, llm) {
   let last = 0, sent = 0;
   // Spoken reply: stream sentences to TTS while the text model is still writing.
   const lang = r.speak ? languageIn(r.goal) : null;
-  const speaker = r.speak && lkConfigured(llm) ? await voice.speakStream(lang ? { ...llm, ttsLang: lang.code } : llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
+  const speaker = r.speak && voiceReady(llm) ? await voice.speakStream(lang ? { ...llm, ttsLang: lang.code } : llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
   const subject = fromClipboard(r) ? "the text on the user's clipboard, using only that text"
     : cite?.type === "video" ? "the video the user is watching, using only its transcript"
     : "the web page the user is looking at, using only the page content provided";

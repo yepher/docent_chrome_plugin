@@ -14,15 +14,16 @@ async function toLfm(msg) {
   return res;
 }
 // Can this computer run it? { ok, problems, warnings, summary }
-export async function lfmCheck() {
-  const { facts } = await toLfm({ type: "lfm:hardware" });
+export async function lfmCheck({ voice = false } = {}) {
+  const { facts } = await toLfm({ type: "lfm:hardware", voice });
   const [cpu, memory] = await Promise.all([chrome.system?.cpu?.getInfo().catch(() => null), chrome.system?.memory?.getInfo().catch(() => null)]);
   return assess({ ...facts, cpuModel: cpu?.modelName, cpuCores: cpu?.numOfProcessors, memoryBytes: memory?.capacity });
 }
-export async function lfmLoad() {
-  const check = await lfmCheck();
+// voice: also load the speech models (about 1 GB more), for this computer's speech.
+export async function lfmLoad({ voice = false } = {}) {
+  const check = await lfmCheck({ voice });
   if (!check.ok) throw new Error(check.problems.join(" "));
-  return (await toLfm({ type: "lfm:load" })).info;
+  return (await toLfm({ type: "lfm:load", voice })).info;
 }
 export const lfmStatus = () => toLfm({ type: "lfm:status" });
 export const lfmClear = () => toLfm({ type: "lfm:clear" });

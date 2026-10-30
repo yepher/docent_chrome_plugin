@@ -1,8 +1,10 @@
-// Voice via LiveKit Inference: TTS (read aloud, spoken answers) and STT (voice questions).
-// The audio itself lives in the offscreen document (offscreen.js); this module sets up
-// auth, sessions and the text that gets spoken.
+// Voice: TTS (read aloud, spoken answers) and STT (voice questions), through LiveKit
+// Inference or LFM3-Omni on this computer. The audio itself lives in the offscreen document
+// (offscreen.js), where both look like the same WebSocket; this module sets up auth,
+// sessions and the text that gets spoken.
 
-import { mintToken, gatewayUrl } from "./lk.js";
+import { mintToken, gatewayUrl, isLocalVoice } from "./lk.js";
+import { lfmLoad } from "./lfm.js";
 import { ensureOffscreen } from "./offscreen-doc.js";
 export { ensureOffscreen };
 
@@ -32,11 +34,15 @@ const splitModel = (s) => {
   return i > 0 && s.indexOf("/") < i ? [s.slice(0, i), s.slice(i + 1)] : [s, ""];
 };
 const wsBase = (s) => gatewayUrl(s).replace(/^http/, "ws");
+const ttsUrl = (s, model) => (isLocalVoice(s) ? "local:tts" : `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`);
+export const localVoiceId = (name) => `lfm/tts:${name === "male" ? "male" : "female"}`;
+const voiceOf = (s) => (isLocalVoice(s) && !String(s.ttsVoice).startsWith("lfm/") ? localVoiceId(s.lfmVoice) : s.ttsVoice || DEFAULT_VOICE);
 const toOffscreen = (msg) => chrome.runtime.sendMessage({ target: "offscreen", ...msg }).catch(() => {});
 
 // Browser WebSockets can't send an Authorization header, so a session rule adds it
 // to the gateway's WebSocket handshake. Token lives 10 minutes; refreshed per session.
 async function setAuth(s) {
+  if (isLocalVoice(s)) return void (await lfmLoad({ voice: true }));
   const token = await mintToken(s.lkApiKey, s.lkApiSecret, 600);
   const host = new URL(gatewayUrl(s)).hostname;
   await chrome.declarativeNetRequest.updateSessionRules({
@@ -106,11 +112,11 @@ export const state = { speaking: false, listening: false, paused: false };
 export async function speakStream(s, opts = {}) {
   await ensureOffscreen();
   await setAuth(s);
-  const [model, voice] = splitModel(s.ttsVoice || DEFAULT_VOICE);
+  const [model, voice] = splitModel(voiceOf(s));
   const gen = { model, ...(voice ? { voice } : {}) };
   await toOffscreen({
     type: "tts:start",
-    url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
+    url: ttsUrl(s, model),
     sampleRate: TTS_RATE,
     create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voice ? { voice } : {}), ...(s.ttsLang ? { language: s.ttsLang } : {}), extra: {} },
     ...(opts.sid ? { sid: opts.sid } : {}),
@@ -140,11 +146,11 @@ export async function speakStream(s, opts = {}) {
 export async function speakSentences(s, list, offset = 0) {
   await ensureOffscreen();
   await setAuth(s);
-  const [model, voiceId] = splitModel(s.ttsVoice || DEFAULT_VOICE);
+  const [model, voiceId] = splitModel(voiceOf(s));
   const gen = { model, ...(voiceId ? { voice: voiceId } : {}) };
   await toOffscreen({
     type: "tts:start",
-    url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
+    url: ttsUrl(s, model),
     sampleRate: TTS_RATE,
     create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(voiceId ? { voice: voiceId } : {}), ...(s.ttsLang ? { language: s.ttsLang } : {}), extra: {} },
   });
@@ -167,9 +173,9 @@ export async function speak(s, text, opts = {}) {
 export async function ttsSpec(s, voiceId) {
   await ensureOffscreen();
   await setAuth(s);
-  const [model, v] = splitModel(voiceId || s.ttsVoice || DEFAULT_VOICE);
+  const [model, v] = splitModel(voiceId || voiceOf(s));
   return {
-    url: `${wsBase(s)}/tts?model=${encodeURIComponent(model)}`,
+    url: ttsUrl(s, model),
     create: { type: "session.create", sample_rate: String(TTS_RATE), encoding: "pcm_s16le", model, ...(v ? { voice: v } : {}), ...(s.ttsLang ? { language: s.ttsLang } : {}), extra: {} },
     gen: { model, ...(v ? { voice: v } : {}) },
     sampleRate: TTS_RATE,
@@ -202,7 +208,7 @@ export async function startListening(s, opts = {}) {
     type: "stt:start",
     continuous: !!opts.continuous,
     endpointMs: opts.endpointMs || 900,
-    url: `${wsBase(s)}/stt?model=${encodeURIComponent(model)}`,
+    url: isLocalVoice(s) ? "local:stt" : `${wsBase(s)}/stt?model=${encodeURIComponent(model)}`,
     create: { type: "session.create", model, settings: { sample_rate: "16000", encoding: "pcm_s16le", language: "en", extra: {} } },
   });
 }

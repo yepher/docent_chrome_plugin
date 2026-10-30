@@ -85,7 +85,7 @@
       </select>
     </label>
     <div id="lfmFields" hidden>
-      <p class="help">LFM3-Omni runs on your GPU with no key, so what it reads and writes stays in this browser. It downloads once (1.4 GB, cached afterwards) and is slower and less accurate than the cloud models, so check what it writes. It only replaces the text model: Jev still sends page details to TypeSafe (choose Laya above to keep those here too), and speech uses LiveKit (see Voice below).</p>
+      <p class="help">LFM3-Omni runs on your GPU with no key, so what it reads and writes stays in this browser. It downloads once (1.4 GB, cached afterwards) and is slower and less accurate than the cloud models, so check what it writes. Jev still sends page details to TypeSafe, so choose Laya above to keep those here too.</p>
       <div class="row">
         <button type="button" id="lfmLoadBtn" class="secondary small">Download &amp; load now</button>
         <button type="button" id="lfmClearBtn" class="secondary small" title="Delete the downloaded model from this browser">Delete download</button>
@@ -121,10 +121,29 @@
       <span id="lkStatus" class="help"></span>
     </div>
 
-    <h2>Voice (LiveKit Inference) <span id="voiceHint" class="optional">uses the LiveKit key above</span></h2>
-    <p id="voiceLocalNote" class="help" hidden>LFM3-Omni only writes text here, so speech always uses LiveKit's text-to-speech and speech-to-text in the cloud. Without a LiveKit key, voice, reading aloud and podcasts are off. With one, your voice and everything Docent says, including page text it reads aloud, goes to LiveKit.</p>
+    <h2><span id="voiceTitle">Voice (LiveKit Inference)</span> <span id="voiceHint" class="optional">uses the LiveKit key above</span></h2>
+    <label id="voiceProviderField" hidden>Speech runs on
+      <select id="voiceProvider">
+        <option value="lfm">This computer (LFM3-Omni)</option>
+        <option value="livekit">LiveKit Inference (cloud)</option>
+      </select>
+    </label>
+    <div id="lfmVoiceFields" hidden>
+      <p class="help">LFM3-Omni speaks and listens on your GPU, so your voice and what Docent says stay in this browser. This downloads about 1 GB more the first time you use voice. There are two voices, in the model's supported languages, and no emotion or pauses in podcasts.</p>
+      <label>Voice
+        <div class="row tight">
+          <select id="lfmVoice">
+            <option value="female">Female</option>
+            <option value="male">Male</option>
+          </select>
+          <button type="button" id="lfmPreview" class="secondary small" title="Hear this voice">▶</button>
+        </div>
+      </label>
+    </div>
+    <p id="voiceLocalNote" class="help" hidden>Your voice and everything Docent says, including page text it reads aloud, goes to LiveKit. Without a key, voice, reading aloud and podcasts are off.</p>
     <div id="lkAccountVoice"></div>
     <div id="voiceFields">
+    <div id="lkVoiceFields">
     <label>Voice
       <div class="row tight">
         <select id="ttsVoice"></select>
@@ -137,6 +156,7 @@
     </label>
     <label class="check"><input id="podcastExpressive" type="checkbox" /> Expressive podcasts (emotion, pauses, laughs; Cartesia and Fish Audio voices)</label>
     <label>Speech-to-text model <select id="sttModel"></select></label>
+    </div>
     <label class="check"><input id="speakAnswers" type="checkbox" /> Always speak answers aloud</label>
     <label>Pronunciations <span class="optional">one per line: word = say as</span>
       <div class="row tight">

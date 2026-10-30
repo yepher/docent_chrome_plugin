@@ -1,5 +1,5 @@
-// Offscreen document: plays LiveKit Inference TTS audio, captures the mic for
-// LiveKit Inference STT, and reads the clipboard. It lives outside the popup, so speech keeps playing after
+// Offscreen document: plays TTS audio, captures the mic for STT (LiveKit Inference, or
+// LFM3-Omni on this computer through LocalSocket), and reads the clipboard. It lives outside the popup, so speech keeps playing after
 // the popup closes. The service worker sets the gateway's Authorization header on
 // these WebSockets with a declarativeNetRequest rule (browser WebSockets can't set
 // headers themselves).
@@ -18,6 +18,88 @@ function int16ToB64(i16) {
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(s);
 }
+
+// ---------- LFM3-Omni speech, behind the same protocol as LiveKit's WebSockets ----------
+// Everything else here (read-along, pause, barge-in, podcast export) doesn't need to know.
+const OPEN = 1, CLOSED = 3;
+const FRAME_RMS_FLOOR = 0.01, SPEECH_CHUNKS = 2, SILENCE_CHUNKS = 6, MAX_SEGMENT_SAMPLES = 16000 * 25;
+
+class LocalSocket {
+  readyState = OPEN;
+  constructor(url, { continuous } = {}) {
+    this.kind = url === "local:stt" ? "stt" : "tts";
+    this.continuous = continuous;
+    this.local = true;
+    this.texts = []; this.flushed = false; this.busy = null;   // speaking
+    this.heard = []; this.voiced = 0; this.quiet = 0; this.noise = FRAME_RMS_FLOOR; this.pending = 0; this.finalizing = false;   // listening
+    setTimeout(() => this.onopen?.(), 0);
+  }
+  deliver(obj) { if (this.readyState === OPEN) this.onmessage?.({ data: JSON.stringify(obj) }); }
+  fail(message) { this.deliver({ type: "error", message }); }
+
+  send(raw) {
+    const m = JSON.parse(raw);
+    if (m.type === "session.create") { this.voiceName = m.voice; this.language = m.language || m.settings?.language; }
+    else if (m.type === "input_transcript") { if (m.transcript.trim()) this.texts.push(m.transcript.trim()); this.nextText(); }
+    else if (m.type === "session.flush") { this.flushed = true; this.nextText(); }
+    else if (m.type === "input_audio") this.onAudio(b64ToInt16(m.audio));
+    else if (m.type === "session.finalize") { this.finalizing = true; this.endSegment(); this.maybeDone(); }
+  }
+
+  async nextText() {
+    if (this.busy) return;
+    const text = this.texts.shift();
+    if (text == null) { if (this.flushed) this.deliver({ type: "done" }); return; }
+    this.busy = crypto.randomUUID();
+    lfmAudio.set(this.busy, (pcm) => this.deliver({ type: "output_audio", audio: int16ToB64(pcm) }));
+    this.deliver({ type: "text_start" });
+    const res = await modelCalls.lfm({ type: "tts", reqId: this.busy, text, voiceName: this.voiceName, language: this.language });
+    lfmAudio.delete(this.busy);
+    this.busy = null;
+    if (res.error) return this.fail(res.error);
+    if (this.readyState === OPEN) this.nextText();
+  }
+
+  // Cuts what the mic hears at pauses: a segment starts when the level rises above the
+  // room's noise, and ends after about 0.75 s of quiet.
+  onAudio(pcm) {
+    let sum = 0;
+    for (const v of pcm) sum += (v / 32768) ** 2;
+    const rms = Math.sqrt(sum / pcm.length), speaking = rms > Math.max(FRAME_RMS_FLOOR, this.noise * 3);
+    if (!speaking) this.noise += (rms - this.noise) * 0.05;
+    this.voiced = speaking ? this.voiced + 1 : this.voiced && this.quiet < SILENCE_CHUNKS ? this.voiced : 0;
+    this.quiet = speaking ? 0 : this.quiet + 1;
+    this.heard.push(pcm);
+    if (this.voiced >= SPEECH_CHUNKS) this.inSpeech = true;
+    if (!this.inSpeech) { this.heard = this.heard.slice(-3); return; }   // a little lead-in
+    const held = this.heard.reduce((n, p) => n + p.length, 0);
+    if (this.quiet >= SILENCE_CHUNKS || held >= MAX_SEGMENT_SAMPLES) this.endSegment();
+  }
+
+  async endSegment() {
+    const chunks = this.heard, spoke = this.inSpeech;
+    this.heard = []; this.inSpeech = false; this.voiced = 0; this.quiet = 0;
+    if (!spoke || !chunks.length) return;
+    const pcm = new Int16Array(chunks.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of chunks) { pcm.set(p, o); o += p.length; }
+    this.pending++;
+    const res = await modelCalls.lfm({ type: "asr", pcm, language: this.language });
+    this.pending--;
+    if (res.error) this.fail(res.error);
+    else if (res.text) this.deliver({ type: "final_transcript", transcript: res.text });
+    this.maybeDone();
+  }
+  // sttStop waits for this, because the last words arrive after the mic stops.
+  maybeDone() { if (this.finalizing && !this.pending) this.drained = true; }
+
+  close() {
+    this.readyState = CLOSED;
+    if (this.busy) modelCalls.lfm({ type: "abort", reqId: this.busy });
+    this.texts = [];
+  }
+}
+const openSocket = (url, opts) => (url.startsWith("local:") ? new LocalSocket(url, opts) : new WebSocket(url));
 
 // ---------- TTS ----------
 let tts = null;
@@ -69,11 +151,19 @@ async function ttsResume() {
 function ttsStart({ url, create, sampleRate, sid, capture }) {
   ttsStop("replaced");
   const ctx = new AudioContext({ sampleRate });
-  const t = { sid, capture, ws: new WebSocket(url), ctx, next: 0, queue: [], sources: [], gotDone: false, bytes: 0, flushed: false, words: new Set(), segs: [], chars: 0, seg: -1 };
+  const t = { sid, capture, ws: openSocket(url), ctx, next: 0, queue: [], sources: [], gotDone: false, bytes: 0, flushed: false, words: new Set(), segs: [], chars: 0, seg: -1, textStarts: [] };
   // Read-along: which sentence is playing now. Sentence start times are estimated in
   // proportion to their length over the audio produced (exact total once "done").
   t.segTimer = setInterval(() => {
     if (tts !== t || !t.segs.length || t.startAt === undefined) return;
+    if (t.ws.local) {
+      // LFM3-Omni says one sentence at a time, so the start of each is known exactly.
+      let i = -1;
+      while (i + 1 < t.textStarts.length && t.textStarts[i + 1] <= ctx.currentTime) i++;
+      const idx = t.segs[i]?.idx;
+      if (idx != null && idx !== t.seg) { t.seg = idx; emit("tts-seg", { idx }); }
+      return;
+    }
     const played = ctx.currentTime - t.startAt;
     if (played < 0) return;
     const produced = t.next - t.startAt;
@@ -99,7 +189,8 @@ function ttsStart({ url, create, sampleRate, sid, capture }) {
     if (tts !== t) return;
     let data;
     try { data = JSON.parse(ev.data); } catch (_) { return; }
-    if (data.type === "output_audio" && data.audio) {
+    if (data.type === "text_start") t.textStarts.push(Math.max(ctx.currentTime, t.next));
+    else if (data.type === "output_audio" && data.audio) {
       const pcm = b64ToInt16(data.audio);
       t.bytes += pcm.length * 2;
       if (t.capture) captures.get(t.capture)?.chunks.push(pcm);
@@ -150,7 +241,7 @@ async function sttStart({ url, create, continuous, endpointMs }) {
   const ctx = new AudioContext({ sampleRate: 16000 });
   const source = ctx.createMediaStreamSource(stream);
   const proc = ctx.createScriptProcessor(2048, 1, 1);
-  const s = { ws: new WebSocket(url), ctx, stream, proc, source, queue: [], finals: [], ended: false, continuous: !!continuous, endpointMs: endpointMs || 900, timer: null };
+  const s = { ws: openSocket(url, { continuous }), ctx, stream, proc, source, queue: [], finals: [], ended: false, continuous: !!continuous, endpointMs: endpointMs || 900, timer: null };
   stt = s;
   const send = (obj) => (s.ws.readyState === 1 ? s.ws.send(JSON.stringify(obj)) : s.queue.push(obj));
   s.send = send;
@@ -227,7 +318,9 @@ async function sttStop(silent) {
     s.ws.send(JSON.stringify({ type: "session.finalize" }));
     // Give the service a moment to return the last final transcript.
     const t0 = Date.now();
-    while (Date.now() - t0 < 1500 && !(s.lastFinal && Date.now() - s.lastFinal > 300)) await new Promise((r) => setTimeout(r, 100));
+    const patience = s.ws.local ? 30000 : 1500; // LFM3-Omni transcribes after you stop, not as you speak
+    const finished = () => (s.ws.local ? s.ws.drained : s.lastFinal && Date.now() - s.lastFinal > 300);
+    while (Date.now() - t0 < patience && !finished()) await new Promise((r) => setTimeout(r, 100));
     try { s.ws.send(JSON.stringify({ type: "session.close" })); } catch (_) {}
   }
   try { s.ws.close(); } catch (_) {}
@@ -250,7 +343,7 @@ function startCapture(key) {
 // Synthesize one turn without playing it: collect the audio until "done".
 function renderTurn({ url, create, text, gen }) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = openSocket(url);
     const chunks = [];
     let done = false;
     const timer = setTimeout(() => { try { ws.close(); } catch (_) {} reject(new Error("TTS timed out")); }, 90_000);
@@ -330,6 +423,7 @@ function modelWorker(file, prefix, name) {
         const m = ev.data || {};
         if (m.type === "progress") chrome.runtime.sendMessage({ type: `${prefix}:progress`, text: m.text, frac: m.frac }).catch(() => {});
         else if (m.type === "delta") chrome.runtime.sendMessage({ type: `${prefix}:delta`, reqId: m.reqId, text: m.text }).catch(() => {});
+        else if (m.type === "audio") lfmAudio.get(m.reqId)?.(m.pcm);
         else if (m.type === "result") { const p = pending.get(m.id); pending.delete(m.id); p?.(m); }
       };
       worker.onerror = (e) => {
@@ -342,6 +436,7 @@ function modelWorker(file, prefix, name) {
     return new Promise((resolve) => { pending.set(id, resolve); worker.postMessage({ ...msg, id }); });
   };
 }
+const lfmAudio = new Map(); // request id → where its speech goes
 const modelCalls = { laya: modelWorker("laya-worker.js", "laya", "Laya"), lfm: modelWorker("lfm-worker.js", "lfm", "LFM3-Omni") };
 
 // ---------- PDF: Chrome's PDF viewer can't be scripted, so read the file with pdf.js ----------

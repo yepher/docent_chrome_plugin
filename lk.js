@@ -4,8 +4,8 @@
 // way the LiveKit Agents SDK does it (livekit/agents inference/_utils.py).
 //
 // chat() is also the way in for the text model that runs on this computer (lfm.js), which
-// is chosen in Settings. Voice always uses LiveKit, so "can write text" (textReady) and
-// "can speak" (lkConfigured) are separate questions.
+// is chosen in Settings. Text and speech can run in different places, so "can write text"
+// (textReady) and "can speak" (voiceReady) are separate questions.
 
 import { lfmChat, LFM_NAME } from "./lfm.js";
 
@@ -29,7 +29,9 @@ export function lkConfigured(s) {
 }
 
 export const isLfm = (s) => s?.textProvider === "lfm";
+export const isLocalVoice = (s) => isLfm(s) && s?.voiceProvider !== "livekit";
 export const textReady = (s) => isLfm(s) || lkConfigured(s);
+export const voiceReady = (s) => isLocalVoice(s) || lkConfigured(s);
 export const textModelName = (s) => (isLfm(s) ? LFM_NAME : s.lkModel || DEFAULT_MODEL);
 
 export function gatewayUrl(s) {

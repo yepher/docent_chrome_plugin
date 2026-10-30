@@ -2,7 +2,7 @@
 // discussion, and two different LiveKit Inference voices perform it. The script is
 // streamed: the first host starts talking as soon as the first line is written.
 
-import { chat, textModelName } from "./lk.js";
+import { chat, textModelName, isLocalVoice } from "./lk.js";
 import * as voice from "./voice.js";
 import * as expr from "./expressive.js";
 
@@ -22,8 +22,9 @@ function secondVoice(v1) {
 }
 
 export function hostsFor(s) {
-  const v1 = s.ttsVoice || voice.DEFAULT_VOICE;
-  const v2 = s.podcastVoice2 && s.podcastVoice2 !== v1 ? s.podcastVoice2 : secondVoice(v1);
+  const local = isLocalVoice(s), other = s.lfmVoice === "male" ? "female" : "male";
+  const v1 = local ? voice.localVoiceId(s.lfmVoice) : s.ttsVoice || voice.DEFAULT_VOICE;
+  const v2 = local ? voice.localVoiceId(other) : s.podcastVoice2 && s.podcastVoice2 !== v1 ? s.podcastVoice2 : secondVoice(v1);
   const a = nameOf(v1, "Alex");
   let b = nameOf(v2, "Sam");
   if (b === a) b = a === "Sam" ? "Alex" : "Sam";

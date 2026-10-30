@@ -1,12 +1,12 @@
-import { listModels, chat, KNOWN_MODELS, DEFAULT_MODEL, lkConfigured, textReady, textModelName, isLfm } from "./lk.js";
+import { listModels, chat, KNOWN_MODELS, DEFAULT_MODEL, lkConfigured, textReady, textModelName, isLfm, isLocalVoice } from "./lk.js";
 import { lfmLoad, lfmStatus, lfmClear, lfmCheck } from "./lfm.js";
-import { SUGGESTED_VOICES, STT_MODELS, DEFAULT_VOICE, DEFAULT_STT } from "./voice.js";
+import { SUGGESTED_VOICES, STT_MODELS, DEFAULT_VOICE, DEFAULT_STT, localVoiceId } from "./voice.js";
 
 const $ = (id) => document.getElementById(id);
 const DEFAULTS = {
   apiKey: "", model: "jev-latest", apiBase: "https://api.typesafe.ai", maxSteps: 15, minConfidence: 0.3, confirmRisky: true,
   decider: "jev", layaBuild: "q4e8", layaDevice: "auto", layaModelBase: "",
-  textProvider: "livekit", lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
+  textProvider: "livekit", voiceProvider: "lfm", lfmVoice: "female", lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
   iconOpens: "popup",
   ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "", podcastExpressive: true, pronunciations: "LiveKit = Lyve Kit",
 };
@@ -168,35 +168,54 @@ function showTextProvider() {
   $("lfmFields").hidden = !lfm;
   $("lkModelField").hidden = lfm;
   $("lkAdvanced").hidden = lfm;
-  // LiveKit is only for speech now, so its key belongs with Voice.
+  // With text on this computer, LiveKit is only for speech, so its key belongs with Voice.
   $(lfm ? "lkAccountVoice" : "lkAccountText").append($("lkAccount"));
-  $("voiceHint").textContent = lfm ? "optional, cloud" : "uses the LiveKit key above";
-  $("voiceLocalNote").hidden = !lfm;
+  $("voiceProviderField").hidden = !lfm;
   showVoiceFields();
   if (lfm) refreshLfm();
 }
+const localVoice = () => isLocalVoice({ textProvider: $("textProvider").value, voiceProvider: $("voiceProvider").value });
 function showVoiceFields() {
+  const lfm = isLfm({ textProvider: $("textProvider").value }), local = localVoice();
   const key = { lkApiKey: $("lkApiKey").value.trim(), lkApiSecret: $("lkApiSecret").value.trim(), lkUrl: $("lkUrl").value.trim(), lkInferenceUrl: $("lkInferenceUrl").value.trim() };
-  $("voiceFields").hidden = isLfm({ textProvider: $("textProvider").value }) && !lkConfigured(key);
+  $("voiceTitle").textContent = lfm ? "Voice" : "Voice (LiveKit Inference)";
+  $("voiceHint").textContent = lfm ? "" : "uses the LiveKit key above";
+  $("lfmVoiceFields").hidden = !local;
+  $("lkAccount").hidden = local;
+  $("lkVoiceFields").hidden = local;
+  $("voiceLocalNote").hidden = !lfm || local;
+  $("voiceFields").hidden = lfm && !local && !lkConfigured(key);
 }
 $("textProvider").onchange = showTextProvider;
+$("voiceProvider").onchange = () => { showVoiceFields(); refreshLfm(); };
 for (const id of ["lkUrl", "lkApiKey", "lkApiSecret"]) $(id).oninput = showVoiceFields;
+$("lfmPreview").onclick = async () => {
+  await chrome.storage.local.set(readForm()); // the service worker reads saved settings
+  lfmText("Getting ready to speak…");
+  const r = await send({ type: "voice:speakText", ttsVoice: localVoiceId($("lfmVoice").value), text: "Hi, I'm Docent. This is how I sound." });
+  if (r?.error) lfmText(r.error, "err"); else refreshLfm();
+};
 function lfmText(text, cls = "") { $("lfmStatus").textContent = text; $("lfmStatus").className = "help " + cls; }
+function lfmDescribe(info) {
+  const speed = info.speechSpeed;
+  if (speed && speed < 1) lfmText(`Loaded on the GPU, but it speaks at ${speed}× real time, so speech will pause while it catches up.`, "err");
+  else lfmText(`Loaded on the GPU.${speed ? ` It speaks at ${speed}× real time.` : ""}`, "ok");
+}
 async function refreshLfm() {
-  const check = await lfmCheck().catch((e) => ({ ok: false, problems: [e.message], warnings: [], summary: "" }));
+  const voice = localVoice();
+  const check = await lfmCheck({ voice }).catch((e) => ({ ok: false, problems: [e.message], warnings: [], summary: "" }));
   $("lfmHardware").textContent = check.summary;
   $("lfmLoadBtn").disabled = !check.ok;
   if (!check.ok) return lfmText(`This computer can't run LFM3-Omni. ${check.problems.join(" ")}`, "err");
   const st = await lfmStatus().catch(() => null);
-  if (st?.info) lfmText("Loaded on the GPU.", "ok");
+  if (st?.info) lfmDescribe(st.info);
   else if (!st?.loading) lfmText(`Not loaded yet. It loads automatically the first time it's needed, or press Download & load now. ${check.warnings.join(" ")}`.trim());
 }
 $("lfmLoadBtn").onclick = async () => {
   $("lfmLoadBtn").disabled = true;
   lfmText("Starting…");
   try {
-    await lfmLoad();
-    lfmText("Loaded on the GPU.", "ok");
+    lfmDescribe(await lfmLoad({ voice: localVoice() }));
   } catch (e) {
     lfmText(e.message, "err");
   }
