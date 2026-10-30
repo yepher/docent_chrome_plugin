@@ -85,6 +85,16 @@ It can also speak and listen. Under *Voice*, *Speech runs on* defaults to **This
 
 **Jev still sends page details to TypeSafe.** Choose Laya as the decision model, with both text and speech on this computer, to keep everything in your browser.
 
+Compared with LiveKit, speech on your computer has these limits:
+
+- **Voices:** one female and one male voice, with no emotion or pauses in podcasts.
+- **Languages:** speech works in 18 languages. Anything else is spoken as American English.
+- **Interrupting:** Docent stops after you pause, not as you start talking, and there's no live text while you speak.
+- **Spoken answers:** speech starts once the written answer is finished.
+- **Download and start-up:** the first use of voice downloads about 1 GB more (2.4 GB in all). After each browser restart, it takes about 10 seconds to load on an Apple M4.
+- **Speed:** an Apple M4 with 16 GB of memory speaks at about 1.2 to 1.4× real time, so slower computers may fall behind. Settings shows your speed and warns you if it's under 1×.
+- **Testing so far:** it has been tested on that M4 with recorded audio only, not with a person talking in a room. Background noise and sound from your speakers reaching the mic are untested, and the memory limits don't yet account for the speech models.
+
 Expect it to be slower and less accurate than the cloud models, and to state things that aren't true with confidence. The model is under Liquid AI's [LFM Open License](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX/blob/main/LICENSE), which doesn't cover commercial use by organizations with $10 million or more in annual revenue.
 
 ## Example commands

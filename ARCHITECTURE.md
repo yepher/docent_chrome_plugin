@@ -310,5 +310,6 @@ The agent runs in the background service worker, so you can close the popup; reo
 - Without a text model configured, it can't type text that isn't in your prompt, and it can't answer open questions.
 - It doesn't see inside iframes, shadow DOM or canvas, and it can't run on `chrome://` pages or the Chrome Web Store.
 - Saved rules send the text of each new page item (up to 400 characters each) to TypeSafe as pages on that site load and scroll (with Jev; with Laya nothing leaves the browser).
+- LFM3-Omni has its own limits on this page and in the README: it's slower and less accurate than the cloud models, and its speech has two voices, no interim transcripts, and has only been tested on an Apple M4 with recorded audio. See [Run the text model on your computer](README.md#run-the-text-model-on-your-computer-optional).
 - Laya is noticeably less reliable than Jev at multi-step tasks and subtle matches, and on a CPU a step can take several seconds. Its confidence numbers aren't comparable to Jev's.
 - With Jev, it sends the page's URL, title, the first ~1500 characters of visible text, and element labels to TypeSafe. With a text model set up, it also sends up to ~16,000 characters of page text to LiveKit Inference when it writes text or answers an open question. Password values are never sent.
