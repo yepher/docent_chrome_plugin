@@ -119,7 +119,23 @@ Prompts like *"highlight reviews that mention battery life"*, *"hide sponsored r
 
 The Answer card lists the matches. Click one, or use ◀ ▶, to scroll to it. **Clear highlights / Show hidden** undoes it. **Save as rule for <site>** keeps it: saved rules re-apply whenever a page on that site loads, and to new items as they appear (infinite scroll or app updates, via a MutationObserver). Only the new items are checked. The toolbar badge shows how many items rules hid or dimmed on the current tab. Rules for the current site are listed under the log, where you can switch each one off or delete it.
 
-## Text model (optional, LiveKit Inference)
+## Text model (optional, LiveKit Inference or on this computer)
+
+In ⚙ → *Text model*, *Runs on* picks where it runs. `chat()` in `lk.js` is the single way in for both; `textReady(s)` answers "can Docent write text?" and `lkConfigured(s)` answers "can Docent speak?", because voice always uses LiveKit.
+
+### LFM3-Omni on this computer
+
+[LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX) runs in a module worker (`lfm-worker.js`) started by the offscreen document, the same way as Laya, and streams tokens back as `lfm:delta` messages that `lfm.js` turns into `chat()`'s `onDelta`.
+
+- **Only the text decoder is used** (`decoder_q4f16`, 1.4 GB), so the vision, audio and speech graphs aren't downloaded. The download is pinned to one model revision and cached in 64 MB parts, so an interrupted download resumes.
+- **It needs its own ONNX Runtime.** `vendor/lfm/` holds the 1.31.1 WebGPU build, because the 1.30 build in `vendor/laya/` can't load this graph. There's no CPU fallback.
+- **Page text can't act as control tokens.** The tokenizer turns `<|im_end|>` written in a page into the real token, so `<|` is broken up in every message before tokenizing.
+- **No silent fallback.** If it can't load, the run stops with the reason rather than sending page text to LiveKit.
+- **Requests run one at a time**, so the four parallel translation batches take turns. Prompts are limited to 32,000 tokens.
+
+Measured on an Apple M4 with 16 GB of memory: a 16,000-character page (about 3,000 tokens) takes about 5 seconds to read, then the answer comes at about 29 tokens a second. The caches stay on the GPU between steps, which tripled that speed.
+
+### LiveKit Inference
 
 Your LiveKit URL, API key and secret are in [LiveKit Cloud → Settings → API keys](https://cloud.livekit.io/projects/p_/settings/keys) (sign in, then *Create key*). Settings links there too.
 
@@ -262,7 +278,11 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `conversation.js` | Hands-free conversation: turn-taking, spoken commands, follow-up rewriting, idle timeout |
 | `decider.js` | Jev or Laya: routes typed questions to the TypeSafe API or the in-browser model, and adapts them for Laya |
 | `laya-worker.js` | Laya in a module worker: download and cache the model, pick WebGPU or CPU, answer questions |
+| `lfm.js` | The LFM3-Omni text model: `chat()`-shaped client for the worker, load, status and delete |
+| `lfm-worker.js` | LFM3-Omni in a module worker: download and cache the decoder, build the prompt, generate on WebGPU |
+| `offscreen-doc.js` | Creates the offscreen document on demand |
 | `vendor/laya/` | ONNX Runtime Web 1.30 (MIT), tokenizers.js (MIT) and layaForWeb's `laya-core.js` (Apache-2.0), with their licences and notice |
+| `vendor/lfm/` | ONNX Runtime Web 1.31.1 WebGPU build (MIT) for LFM3-Omni |
 | `pdfdoc.js` | PDFs: detect a PDF tab, extract and cache its text (via the offscreen document), reading chunks, turn the viewer's page |
 | `vendor/pdfjs/` | pdf.js 5.7 legacy build (Apache-2.0) and its CMaps, for reading PDFs |
 | `expressive.js` | Expressive podcasts: per-provider marker instructions and lowering to Cartesia/Fish Audio markup (port of LiveKit Agents' expressive mode) |

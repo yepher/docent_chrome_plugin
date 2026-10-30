@@ -2,7 +2,7 @@
 // discussion, and two different LiveKit Inference voices perform it. The script is
 // streamed: the first host starts talking as soon as the first line is written.
 
-import { chat, DEFAULT_MODEL } from "./lk.js";
+import { chat, textModelName } from "./lk.js";
 import * as voice from "./voice.js";
 import * as expr from "./expressive.js";
 
@@ -58,7 +58,7 @@ export class Podcast {
   async write({ title, url, text, goal, signal, cited }) {
     const [a, b] = this.d.hosts;
     const words = targetWords(goal);
-    const model = this.d.settings.lkModel || DEFAULT_MODEL;
+    const model = textModelName(this.d.settings);
     this.d.log?.("info", `${model} is writing a ${Math.round(words / 150)}-minute script for ${a.name} and ${b.name}…`);
     let buf = "", spokenUpTo = 0;
     const take = (all) => {

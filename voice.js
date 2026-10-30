@@ -3,6 +3,8 @@
 // auth, sessions and the text that gets spoken.
 
 import { mintToken, gatewayUrl } from "./lk.js";
+import { ensureOffscreen } from "./offscreen-doc.js";
+export { ensureOffscreen };
 
 export const SUGGESTED_VOICES = [
   ["cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc", "Jacqueline · Cartesia (US female)"],
@@ -31,20 +33,6 @@ const splitModel = (s) => {
 };
 const wsBase = (s) => gatewayUrl(s).replace(/^http/, "ws");
 const toOffscreen = (msg) => chrome.runtime.sendMessage({ target: "offscreen", ...msg }).catch(() => {});
-
-export async function ensureOffscreen() {
-  const has = chrome.offscreen.hasDocument ? await chrome.offscreen.hasDocument() : false;
-  if (has) return;
-  try {
-    await chrome.offscreen.createDocument({
-      url: "offscreen.html",
-      reasons: ["AUDIO_PLAYBACK", "USER_MEDIA", "WORKERS", "CLIPBOARD"],
-      justification: "Play LiveKit Inference text-to-speech, capture the microphone for voice questions, run the in-browser Laya decision model in a worker, and read or write the clipboard when you ask.",
-    });
-  } catch (e) {
-    if (!/single offscreen|already/i.test(e.message)) throw e;
-  }
-}
 
 // Browser WebSockets can't send an Authorization header, so a session rule adds it
 // to the gateway's WebSocket handshake. Token lives 10 minutes; refreshed per session.

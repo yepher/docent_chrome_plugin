@@ -1,11 +1,12 @@
-import { listModels, chat, KNOWN_MODELS, DEFAULT_MODEL, lkConfigured } from "./lk.js";
+import { listModels, chat, KNOWN_MODELS, DEFAULT_MODEL, lkConfigured, textReady, textModelName, isLfm } from "./lk.js";
+import { lfmLoad, lfmStatus, lfmClear } from "./lfm.js";
 import { SUGGESTED_VOICES, STT_MODELS, DEFAULT_VOICE, DEFAULT_STT } from "./voice.js";
 
 const $ = (id) => document.getElementById(id);
 const DEFAULTS = {
   apiKey: "", model: "jev-latest", apiBase: "https://api.typesafe.ai", maxSteps: 15, minConfidence: 0.3, confirmRisky: true,
   decider: "jev", layaBuild: "q4e8", layaDevice: "auto", layaModelBase: "",
-  lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
+  textProvider: "livekit", lkUrl: "", lkApiKey: "", lkApiSecret: "", lkModel: DEFAULT_MODEL, lkInferenceUrl: "",
   iconOpens: "popup",
   ttsVoice: DEFAULT_VOICE, sttModel: DEFAULT_STT, speakAnswers: false, podcastVoice2: "", podcastExpressive: true, pronunciations: "LiveKit = Lyve Kit",
 };
@@ -31,6 +32,7 @@ async function loadSettings() {
   // First time with LiveKit set up: fetch the real model list in the background.
   if (!lkModelList?.length && lkConfigured(s)) $("lkRefresh").click();
   showDecider();
+  showTextProvider();
   if (!s.apiKey && !String(s.decider).startsWith("laya")) $("settings").hidden = false;
   return s;
 }
@@ -144,16 +146,55 @@ $("lkRefresh").onclick = async () => {
 
 $("lkTest").onclick = async () => {
   const s = readForm();
-  if (!lkConfigured(s)) return lkStatus("Enter the LiveKit URL, key and secret first.", "err");
-  lkStatus(`Asking ${s.lkModel}…`);
+  if (!textReady(s)) return lkStatus("Enter the LiveKit URL, key and secret first.", "err");
+  const name = textModelName(s);
+  lkStatus(`Asking ${name}…`);
   const t0 = performance.now();
   try {
     const out = await chat(s, [{ role: "user", content: "Reply with exactly: OK" }], { maxTokens: 20 });
-    lkStatus(`${s.lkModel} replied "${out.trim().slice(0, 40)}" in ${Math.round(performance.now() - t0)} ms.`, "ok");
+    lkStatus(`${name} replied "${out.trim().slice(0, 40)}" in ${Math.round(performance.now() - t0)} ms.`, "ok");
   } catch (e) {
     lkStatus(e.message, "err");
   }
 };
+
+// ---------- text model: LiveKit or LFM3-Omni ----------
+function showTextProvider() {
+  const lfm = isLfm({ textProvider: $("textProvider").value });
+  $("lfmFields").hidden = !lfm;
+  $("lkModelField").hidden = lfm;
+  $("lkAdvanced").hidden = lfm;
+  if (lfm) refreshLfm();
+}
+$("textProvider").onchange = showTextProvider;
+function lfmText(text, cls = "") { $("lfmStatus").textContent = text; $("lfmStatus").className = "help " + cls; }
+async function refreshLfm() {
+  const st = await lfmStatus().catch(() => null);
+  if (st?.info) lfmText("Loaded on the GPU.", "ok");
+  else if (!st?.loading) lfmText("Not loaded yet. It loads automatically the first time it's needed, or press Download & load now.");
+}
+$("lfmLoadBtn").onclick = async () => {
+  $("lfmLoadBtn").disabled = true;
+  lfmText("Starting…");
+  try {
+    await lfmLoad();
+    lfmText("Loaded on the GPU.", "ok");
+  } catch (e) {
+    lfmText(e.message, "err");
+  }
+  $("lfmLoadBtn").disabled = false;
+};
+$("lfmClearBtn").onclick = async () => {
+  try {
+    const r = await lfmClear();
+    lfmText(`Deleted the downloaded model (${r.cleared || 0} cache${r.cleared === 1 ? "" : "s"}).`);
+  } catch (e) {
+    lfmText(e.message, "err");
+  }
+};
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "lfm:progress" && !$("lfmFields").hidden) lfmText(msg.text);
+});
 
 // ---------- decision model: Jev or Laya ----------
 function showDecider() {

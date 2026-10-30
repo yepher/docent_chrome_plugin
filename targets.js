@@ -11,7 +11,7 @@
 
 import { buildOutline, extractRange } from "./outline.js";
 import { focusedItem, readItem } from "./items.js";
-import { chat } from "./lk.js";
+import { chat, textModelName } from "./lk.js";
 import { choice } from "./jev.js";
 import { decide, deciderReady, isLaya, deciderName } from "./decider.js";
 
@@ -61,12 +61,12 @@ export async function pickTarget(ctx, purpose) {
         { role: "user", content: `Request: ${ctx.goal}\n(The assistant will ${purpose} it.)\nPage: ${outline.title} (${outline.url})\n\nOutline:\n${outlineText(outline.lines)}` },
       ], { signal: ctx.signal, maxTokens: 120 });
       const j = JSON.parse((out.match(/\{[\s\S]*\}/) || ["{}"])[0]);
-      if (j.scope === "page") { log("info", `${ctx.llm.lkModel}: the whole page.`); return { kind: "page" }; }
+      if (j.scope === "page") { log("info", `${textModelName(ctx.llm)}: the whole page.`); return { kind: "page" }; }
       if (idx(j.start) >= 0) {
         let s = idx(j.start), e = idx(j.end) >= 0 ? idx(j.end) : Math.min(ids.length - 1, s + 40);
         if (e < s) [s, e] = [e, s];
         range = { start: ids[s], end: ids[e], label: j.label || "" };
-        log("info", `${ctx.llm.lkModel}: ${range.label || "a section"} (lines ${range.start}–${range.end}).`);
+        log("info", `${textModelName(ctx.llm)}: ${range.label || "a section"} (lines ${range.start}–${range.end}).`);
       } else {
         log("warn", `The text model didn't return a usable range (${out.slice(0, 120)}).`);
       }
@@ -142,7 +142,7 @@ async function pdfTarget(ctx, purpose) {
     ctx.log("warn", `Couldn't locate it with the text model: ${e.message}`);
   }
   if (!range) { ctx.log("info", "The whole PDF."); return { kind: "page" }; }
-  ctx.log("info", `${ctx.llm.lkModel}: ${range.label} (page ${doc.paras[range.from].page}${doc.paras[range.to - 1].page !== doc.paras[range.from].page ? `–${doc.paras[range.to - 1].page}` : ""}).`);
+  ctx.log("info", `${textModelName(ctx.llm)}: ${range.label} (page ${doc.paras[range.from].page}${doc.paras[range.to - 1].page !== doc.paras[range.from].page ? `–${doc.paras[range.to - 1].page}` : ""}).`);
   const text = doc.paras.slice(range.from, range.to).map((p) => p.text).join("\n");
   return { kind: "item", text, first: range.label, label: range.label, range: [range.from, range.to] };
 }

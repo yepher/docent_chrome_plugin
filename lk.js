@@ -2,6 +2,12 @@
 // Auth is a short-lived LiveKit access token (HS256 JWT) carrying an
 // `inference.perform` grant, minted here from your API key and secret, the same
 // way the LiveKit Agents SDK does it (livekit/agents inference/_utils.py).
+//
+// chat() is also the way in for the text model that runs on this computer (lfm.js), which
+// is chosen in Settings. Voice always uses LiveKit, so "can write text" (textReady) and
+// "can speak" (lkConfigured) are separate questions.
+
+import { lfmChat, LFM_NAME } from "./lfm.js";
 
 export const PROD_GATEWAY = "https://agent-gateway.livekit.cloud/v1";
 export const STAGING_GATEWAY = "https://agent-gateway.staging.livekit.cloud/v1";
@@ -21,6 +27,10 @@ export const DEFAULT_MODEL = "openai/gpt-4.1-mini";
 export function lkConfigured(s) {
   return !!(s.lkApiKey && s.lkApiSecret && (s.lkUrl || s.lkInferenceUrl));
 }
+
+export const isLfm = (s) => s?.textProvider === "lfm";
+export const textReady = (s) => isLfm(s) || lkConfigured(s);
+export const textModelName = (s) => (isLfm(s) ? LFM_NAME : s.lkModel || DEFAULT_MODEL);
 
 export function gatewayUrl(s) {
   if (s.lkInferenceUrl) return s.lkInferenceUrl.replace(/\/+$/, "");
@@ -72,6 +82,7 @@ export const isReasoningModel = (model) => /(^|\/)(gpt-5|o1|o3|o4)(\b|[-.])/i.te
 const REASONING_HEADROOM = 4000;
 
 export async function chat(s, messages, opts = {}) {
+  if (isLfm(s)) return lfmChat(messages, opts);
   const text = await chatOnce(s, messages, opts, false);
   // Still empty because the limit ran out while thinking: try once more with no limit.
   if (!text.trim() && chat.lastFinish === "length" && !opts.signal?.aborted) return chatOnce(s, messages, opts, true);

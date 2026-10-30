@@ -2,7 +2,7 @@
 //   action   – which kind of step comes next (click / type / select / scroll / back / open URL / done)
 //   *_target – which indexed page element to act on
 //   text     – which span of the user's prompt to type (Jev doesn't generate text), or
-//              "compose", which hands the writing to the optional LiveKit Inference text model
+//              "compose", which hands the writing to the optional text model
 //   submit   – whether to press Enter after typing
 // All of these are asked together in one request per step (speculative fan-out).
 
@@ -17,7 +17,8 @@ import { supportsExpressive, strip as stripExpr } from "./expressive.js";
 import { prepareReadAlong, highlightSentence, clearReadAlong, nextReadingChunk, loadMoreBelow } from "./karaoke.js";
 import { podcastSource, showPodcastRefs, clearPodcastRefs } from "./podsource.js";
 import { pdfFor, pdfText, pdfChunks, pdfNumbered, endOfBody, bodyStart, goToPage } from "./pdfdoc.js";
-import { chat, lkConfigured, DEFAULT_MODEL } from "./lk.js";
+import { chat, lkConfigured, textReady, textModelName, isLfm, DEFAULT_MODEL } from "./lk.js";
+import { lfmLoad, lfmStatus } from "./lfm.js";
 import { focusRef, clearMarks, getSelectionText } from "./items.js";
 import { pickTarget as pickTargetFromOutline } from "./targets.js";
 import { pageSkeleton, applyEdits, undoEdits } from "./restyle.js";
@@ -40,7 +41,8 @@ export const DEFAULTS = {
   maxSteps: 15,
   minConfidence: 0.3,
   confirmRisky: true,
-  // Optional text model via LiveKit Inference
+  // Optional text model: LiveKit Inference, or LFM3-Omni on this computer
+  textProvider: "livekit", // livekit | lfm
   lkUrl: "",
   lkApiKey: "",
   lkApiSecret: "",
@@ -135,7 +137,7 @@ Talk hands-free (Alt+Shift+J)
 - "stop", "continue", "repeat that", "goodbye"
 
 Keys: Alt+J opens Docent, Alt+Shift+P pauses or resumes speech, ■ stops.
-Settings (⚙): the decision model (Jev with a TypeSafe key, or Laya in your browser) and LiveKit for summaries, voice and podcasts.`;
+Settings (⚙): the decision model (Jev with a TypeSafe key, or Laya in your browser) a text model for summaries (LiveKit, or LFM3-Omni on this computer) and LiveKit for voice and podcasts.`;
 const HELP_SPOKEN = "You can ask me questions about the page, or ask me to summarize it, read it aloud, or make it a podcast. I can highlight or hide things by meaning, change how the page looks, click and type for you, and read or summarize your clipboard. Say stop, continue or repeat that while I'm talking, and goodbye to finish. The full list is in the panel.";
 function showHelp(r, s) {
   r.kind = "help";
@@ -184,7 +186,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return downloadPodcast();
       // ---- Laya (in-browser decision model) ----
       case "laya:progress":
-        onLayaProgress(msg);
+      case "lfm:progress":
+        onModelProgress(msg);
         return { ok: true };
       case "laya:load":
         return layaLoad({ ...(await loadSettings()), ...(msg.settings || {}) }).then((info) => ({ info }), (e) => ({ error: e.message }));
@@ -351,13 +354,14 @@ async function agentLoop(r) {
   r.settings = s;
   if (s.speakAnswers && lkConfigured(s)) r.speak = true;
   if (HELP.test(r.goal.trim()) && !r.read && !r.podcast) return showHelp(r, s);
+  if (isLfm(s) && !r.read) await ensureLfm(r);
   if (UNDO_CHANGES.test(r.goal.trim())) return undoChanges(r);
   // Before the clipboard is read for "…clipboard" requests: this one writes to it.
   if (COPY_SECRET.test(r.goal) && !/\b(response|request) headers\b|\bcurl\b/i.test(r.goal)) return copySecret(r);
   if (CLIPBOARD.test(r.goal)) {
     await useClipboard(r);
     // Clear-cut wordings don't need the decision model (or a readable page).
-    const quick = lkConfigured(s) && !r.read && !r.podcast ? (QUICK_KINDS.find(([, re, needsLlm]) => needsLlm && re.test(r.goal.trim())) || [])[0] : null;
+    const quick = textReady(s) && !r.read && !r.podcast ? (QUICK_KINDS.find(([, re, needsLlm]) => needsLlm && re.test(r.goal.trim())) || [])[0] : null;
     if (quick === "read") r.read = true;
     if (quick === "podcast") r.podcast = true;
     if (quick === "explain") {
@@ -382,10 +386,10 @@ async function agentLoop(r) {
     const goal = r.goal.trim();
     if (READER.test(goal) && goal.split(/\s+/).length <= 8) return readerMode(r);
     const term = termToDefine(r);
-    if (term && lkConfigured(s)) return defineTerm(r, s, term);
-    if (r.define) return finish("stopped", "Defining a word needs a text model to write the definition. Add your LiveKit URL, key and secret in Settings.");
+    if (term && textReady(s)) return defineTerm(r, s, term);
+    if (r.define) return finish("stopped", "Defining a word needs a text model to write the definition. Set one up in Settings.");
     // "Explain this simply": clear-cut, so it doesn't need the decision model.
-    if (lkConfigured(s) && SIMPLY.test(goal) && EXPLAIN_QUICK.test(goal)) {
+    if (textReady(s) && SIMPLY.test(goal) && EXPLAIN_QUICK.test(goal)) {
       r.kind = "explain";
       if (WANTS_VOICE.test(goal)) r.speak = true;
       log("info", `Goal: ${r.goal}`, r.selection ? `with ${fromClipboard(r) ? "clipboard" : "selected"} text: "${r.selection.slice(0, 100)}${r.selection.length > 100 ? "…" : ""}"` : undefined);
@@ -414,7 +418,7 @@ async function agentLoop(r) {
 
   // Is this a question about the page, or something to do?
   await settle(r.tabId);
-  const llm = lkConfigured(s) ? s : null;
+  const llm = textReady(s) ? s : null;
   const kind = await classifyPrompt(r, ask, llm);
   r.kind = kind;
   if (r.pdf && ["task", "find", "hide"].includes(kind)) {
@@ -727,31 +731,47 @@ ${Object.entries(kinds).map(([k, d]) => `${k}: ${d}`).join("\n")}` },
     { role: "user", content: `${r.selection ? `(The user selected some text on the page.)\n` : ""}Request: ${goal}` },
   ], { maxTokens: 8, signal: r.abort.signal }).catch(() => "");
   const k = (out.toLowerCase().match(/[a-z_]+/) || [])[0];
-  if (k && kinds[k]) { log("info", `Understood as: ${k.replace("_", "/")}`, `by ${llm.lkModel || DEFAULT_MODEL}`); return k; }
+  if (k && kinds[k]) { log("info", `Understood as: ${k.replace("_", "/")}`, `by ${textModelName(llm)}`); return k; }
   return null;
 }
 
 // Laya: make sure the model is loaded, showing download/start-up progress in the log.
-let layaProgressEntry = null;
+let modelProgressEntry = null;
 async function ensureLaya(r, s) {
   const st = await layaStatus().catch(() => null);
   if (st?.info) return;
   log("info", "Loading Laya, the in-browser decision model…", "The first time, this downloads the model once (about 290 MB for the int4 build). After that it loads from the browser's cache.");
-  layaProgressEntry = r.log.at(-1);
+  modelProgressEntry = r.log.at(-1);
   try {
     const info = await layaLoad(s);
-    layaProgressEntry.text = `Laya ready: ${info.checkpoint === "laya" ? "general" : "typed-decisions"} model, ${info.device === "webgpu" ? "WebGPU" : `CPU (${info.threads} thread${info.threads === 1 ? "" : "s"})`}, ${Math.round(info.loadMs / 1000)} s to load${info.fromCache ? " from cache" : ""}.`;
-    layaProgressEntry.detail = undefined;
+    modelProgressEntry.text = `Laya ready: ${info.checkpoint === "laya" ? "general" : "typed-decisions"} model, ${info.device === "webgpu" ? "WebGPU" : `CPU (${info.threads} thread${info.threads === 1 ? "" : "s"})`}, ${Math.round(info.loadMs / 1000)} s to load${info.fromCache ? " from cache" : ""}.`;
+    modelProgressEntry.detail = undefined;
     publish();
   } finally {
-    layaProgressEntry = null;
+    modelProgressEntry = null;
   }
 }
-let lastLayaPublish = 0;
-function onLayaProgress(msg) {
-  if (!layaProgressEntry || !run) return;
-  layaProgressEntry.text = msg.text;
-  if (Date.now() - lastLayaPublish > 250) { lastLayaPublish = Date.now(); publish(); }
+// LFM3-Omni: the same, except that Stop works during the long first download.
+async function ensureLfm(r) {
+  const st = await lfmStatus().catch(() => null);
+  if (st?.info) return;
+  log("info", "Loading LFM3-Omni, the text model on this computer…", "The first time, this downloads the model once (about 1.4 GB). After that it loads from the browser's cache.");
+  modelProgressEntry = r.log.at(-1);
+  const stopped = new Promise((_, reject) => r.abort.signal.addEventListener("abort", () => reject(new DOMException("Stopped", "AbortError")), { once: true }));
+  try {
+    const info = await Promise.race([lfmLoad(), stopped]);
+    modelProgressEntry.text = `LFM3-Omni ready: ${Math.round(info.loadMs / 1000)} s to load.`;
+    modelProgressEntry.detail = undefined;
+    publish();
+  } finally {
+    modelProgressEntry = null;
+  }
+}
+let lastModelPublish = 0;
+function onModelProgress(msg) {
+  if (!modelProgressEntry || !run) return;
+  modelProgressEntry.text = msg.text;
+  if (Date.now() - lastModelPublish > 250) { lastModelPublish = Date.now(); publish(); }
 }
 
 async function classifyPrompt(r, ask, llm) {
@@ -920,7 +940,7 @@ const cssKey = (tabId) => `docentCss:${tabId}`;
 const addedCss = async (tabId) => (await chrome.storage.session.get(cssKey(tabId)))[cssKey(tabId)] || [];
 
 async function changePage(r, llm) {
-  if (!llm) return finish("stopped", "Changing a page needs a text model to write the change. Add your LiveKit URL, key and secret in Settings.");
+  if (!llm) return finish("stopped", "Changing a page needs a text model to write the change. Set one up in Settings.");
   if (r.pdf) return finish("stopped", "Docent can't change how a PDF looks in Chrome's viewer.");
   let sk;
   try {
@@ -929,7 +949,7 @@ async function changePage(r, llm) {
     throw new Error(`Can't change this page (${e.message}). Chrome blocks extensions on chrome:// pages, the Web Store and some viewers.`);
   }
   if (!sk?.skeleton) return finish("stopped", "Couldn't read this page's structure.");
-  const model = llm.lkModel || DEFAULT_MODEL;
+  const model = textModelName(llm);
   log("info", `Asking ${model} to write the change…`);
   const out = await chat(llm, [
     { role: "system", content: CHANGE_PROMPT },
@@ -1007,13 +1027,13 @@ const DEVTOOLS_HINT = "Open DevTools on this tab (⌥⌘I on a Mac, Ctrl+Shift+I
 async function runJavaScript(r, s) {
   r.kind = "javascript";
   log("info", `Goal: ${r.goal}`);
-  const llm = lkConfigured(s) ? s : null;
+  const llm = textReady(s) ? s : null;
   let code = codeIn(r.goal) || (r.selection && /\b(selected|selection|this|that|it|clipboard|copied)\b/i.test(r.goal) ? r.selection : "");
   if (!code) {
-    if (!llm) return finish("stopped", "Put the code in backticks, e.g. run `document.title`. Writing code from a description needs a text model: add your LiveKit URL, key and secret in Settings.");
+    if (!llm) return finish("stopped", "Put the code in backticks, e.g. run `document.title`. Writing code from a description needs a text model: set one up in Settings.");
     const tab = await chrome.tabs.get(r.tabId);
     const sk = await inject(r.tabId, pageSkeleton, [7000]).catch(() => null);
-    const model = llm.lkModel || DEFAULT_MODEL;
+    const model = textModelName(llm);
     log("info", `Asking ${model} to write the code…`);
     code = (await chat(llm, [
       { role: "system", content: CODE_PROMPT },
@@ -1177,7 +1197,7 @@ async function dataSourceAnswer(r, s) {
 async function networkAnswer(r, s) {
   r.kind = "network";
   log("info", `Goal: ${r.goal}`);
-  const llm = lkConfigured(s) ? s : null;
+  const llm = textReady(s) ? s : null;
   const tab = await chrome.tabs.get(r.tabId);
   const dt = await devtoolsOpen(r.tabId);
   let entries;
@@ -1212,13 +1232,13 @@ async function networkAnswer(r, s) {
     const show = (matched.length ? matched : entries.filter((e) => /^(xhr|fetch)$/.test(e.type))).slice(-40);
     r.answer = {
       text: matched.length ? `${matched.length} request${matched.length === 1 ? "" : "s"} mention ${terms.join(", ")}` : `${show.length} API request${show.length === 1 ? "" : "s"}`,
-      note: "Answering questions about the requests needs a text model: add your LiveKit URL, key and secret in Settings. Without one, Docent lists the requests that mention your words.",
+      note: "Answering questions about the requests needs a text model: set one up in Settings. Without one, Docent lists the requests that mention your words.",
       items: show.map((e) => ({ text: `${e.method || ""} ${e.status || ""} ${e.url}`.trim() })),
     };
     return finish("done", "Listed the requests.");
   }
 
-  const model = llm.lkModel || DEFAULT_MODEL;
+  const model = textModelName(llm);
   const head = `Page title: ${tab.title}\nURL: ${tab.url}\n\nRequests (${lines.length} of ${entries.length}; id method status type mime size time url):\n${lines.join("\n")}`;
   let opened = [];
   if (dt) {
@@ -1275,7 +1295,7 @@ async function defineTerm(r, llm, term) {
   r.kind = "define";
   log("info", `Goal: ${r.goal}`);
   const passage = term.length > 120 || term.split(/\s+/).length > 12;
-  const model = llm.lkModel || DEFAULT_MODEL;
+  const model = textModelName(llm);
   // The paragraph it appears in, so the meaning given is the one used here.
   const context = passage || r.pdf || fromClipboard(r) ? "" : (await inject(r.tabId, termContext, [term, 700]).catch(() => "")) || "";
   const title = fromClipboard(r) ? "" : r.pdf?.title || (await chrome.tabs.get(r.tabId).catch(() => null))?.title || "";
@@ -1309,7 +1329,7 @@ const TRANSLATE_CHARS = 60000;
 
 async function translatePage(r, s) {
   r.kind = "translate";
-  if (!lkConfigured(s)) return finish("stopped", "Translating a page needs a text model to write the translation. Add your LiveKit URL, key and secret in Settings.");
+  if (!textReady(s)) return finish("stopped", "Translating a page needs a text model to write the translation. Set one up in Settings.");
   const lang = languageIn(r.goal, true) || uiLanguage();
   log("info", `Goal: ${r.goal}`);
   let src;
@@ -1320,7 +1340,7 @@ async function translatePage(r, s) {
   }
   const total = src?.texts?.length || 0;
   if (!total) return finish("stopped", "Couldn't find text on this page to translate.");
-  const model = s.lkModel || DEFAULT_MODEL;
+  const model = textModelName(s);
   log("info", `Translating ${total.toLocaleString()} pieces of text into ${lang.name} with ${model}…`, src.more ? `Long page: translating the first ${TRANSLATE_CHARS.toLocaleString()} characters.` : undefined);
   const entry = r.log.at(-1);
   let done = 0, changed = 0;
@@ -1444,7 +1464,7 @@ async function readAloud(r, s) {
 // text model or Jev picks the range → extract its text).
 function pickTarget(r, s, purpose) {
   return pickTargetFromOutline({
-    tabId: r.tabId, goal: r.goal, settings: s, pdf: r.pdf || null, llm: lkConfigured(s) ? s : null, signal: r.abort.signal,
+    tabId: r.tabId, goal: r.goal, settings: s, pdf: r.pdf || null, llm: textReady(s) ? s : null, signal: r.abort.signal,
     log: (k, t, d) => log(k, t, d),
     inject: (func, args) => inject(r.tabId, func, args),
   }, purpose);
@@ -1694,7 +1714,7 @@ async function makePodcast(r, s) {
   }
   if (!pod.turns.length) {
     pod.stop();
-    r.answer = { text: "No script", note: `${s.lkModel || DEFAULT_MODEL} returned nothing. Try again, or pick a different text model in Settings.`, items: [], spoken: true };
+    r.answer = { text: "No script", note: `${textModelName(s)} returned nothing. Try again, or pick a different text model in Settings.`, items: [], spoken: true };
     return finish("error", "The text model didn't return a script.");
   }
   const words = pod.turns.reduce((n, t) => n + stripExpr(t.text).split(/\s+/).length, 0);
@@ -1732,7 +1752,7 @@ async function suggestNext(r) {
   r.suggestions = base.slice(0, 4);
   publish();
   const s = r.settings;
-  if (!s || !lkConfigured(s)) return;
+  if (!s || !textReady(s)) return;
   // Page-specific ideas from the text model, next to the built-in ones.
   const page = r.pdf ? { title: r.pdf.title, url: r.pdf.url, text: pdfText(r.pdf, 1500) } : await inject(r.tabId, pageText, [1500]).catch(() => null);
   const result = r.answer ? `${r.answer.text}`.slice(0, 400) : (r.log.at(-1)?.text || "");
@@ -1774,7 +1794,7 @@ chrome.commands.onCommand.addListener((cmd) => {
   if (cmd === "pause-speaking") (voice.state.paused ? voice.resumeSpeaking() : voice.pauseSpeaking()).catch(() => {});
 });
 
-// ---------- text model (LiveKit Inference) ----------
+// ---------- text model ----------
 // Written answers cite their source: the text given to the model is split into numbered
 // blocks ([p12] text, [m3] image, [t40] a moment in a video), the model ends each sentence
 // with the ids it rests on, and the Answer card shows them as links (see showCitation).
@@ -1869,7 +1889,7 @@ async function writtenAnswer(r, llm) {
   }
   if (cite) await chrome.storage.session.set({ docentCite: { ...cite, tabId: r.tabId, url: r.pdf?.url || "" } });
   else await chrome.storage.session.remove("docentCite");
-  const model = llm.lkModel || DEFAULT_MODEL;
+  const model = textModelName(llm);
   const noteFor = (cited) => `Written by ${model} from the ${source}. Not checked by ${deciderName(r.settings || llm)}.`
     + (!cited ? "" : cite.type === "video" ? " Click a time to jump the video there." : cite.type === "pdf" ? " Click a page number to turn the PDF to it." : " Click a number to see that part of the page.");
   r.answer = { text: "", note: noteFor(false), items: [], long: true };
@@ -1889,7 +1909,7 @@ async function writtenAnswer(r, llm) {
   let last = 0, sent = 0;
   // Spoken reply: stream sentences to TTS while the text model is still writing.
   const lang = r.speak ? languageIn(r.goal) : null;
-  const speaker = r.speak ? await voice.speakStream(lang ? { ...llm, ttsLang: lang.code } : llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
+  const speaker = r.speak && lkConfigured(llm) ? await voice.speakStream(lang ? { ...llm, ttsLang: lang.code } : llm).catch((e) => { log("warn", `Voice: ${e.message}`); return null; }) : null;
   const subject = fromClipboard(r) ? "the text on the user's clipboard, using only that text"
     : cite?.type === "video" ? "the video the user is watching, using only its transcript"
     : "the web page the user is looking at, using only the page content provided";
@@ -1920,7 +1940,7 @@ async function writtenAnswer(r, llm) {
 
 async function composeText(r, llm, snap, field, history) {
   const page = await inject(r.tabId, pageText, [8000]);
-  const model = llm.lkModel || DEFAULT_MODEL;
+  const model = textModelName(llm);
   log("info", `Writing text for ${field.desc} with ${model}…`);
   const out = await chat(llm, [
     { role: "system", content: "You write the text for one field on a web page, on behalf of the user. Reply with only the exact text to put in the field: no quotes around it, no preamble, no explanation, no markdown." },

@@ -10,7 +10,7 @@ A Chrome extension that acts as a guide for the page you're on. Ask it questions
 2. Open `chrome://extensions` and turn on **Developer mode** (top right).
 3. Click **Load unpacked** and choose this folder.
 4. Pin Docent from the puzzle-piece menu, then click its icon (or press **Alt+J**).
-5. Click ⚙, [choose a decision model](#choose-a-decision-model-jev-or-laya) and, if you want summaries and voice, [set up LiveKit](#set-up-livekit-optional).
+5. Click ⚙, [choose a decision model](#choose-a-decision-model-jev-or-laya) and, if you want summaries and voice, [set up LiveKit](#set-up-livekit-optional). For summaries with no account, you can [run the text model on your computer](#run-the-text-model-on-your-computer-optional) instead.
 6. Click **Save**.
 
 After changing the code, click the reload arrow on Docent's card in `chrome://extensions`.
@@ -68,6 +68,18 @@ Without LiveKit, Docent can still click and type text from your prompt, answer y
 6. Under *Voice*, pick a voice (▶ plays a sample) and a speech-to-text model, then click **Save**.
 
 Both keys are stored in `chrome.storage.local`, which isn't encrypted, so use a LiveKit project you're comfortable using for this.
+
+## Run the text model on your computer (optional)
+
+Instead of LiveKit Inference, the text model can be [LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX), which runs on your GPU with WebGPU. There's no key, and page text never leaves the browser.
+
+1. In ⚙ → *Text model*, set *Runs on* to **This computer**.
+2. Click **Download & load now**. The model downloads once (1.4 GB) and is cached in the browser. *Delete download* removes it.
+3. Click **Test text model**, then **Save**.
+
+It covers everything the text model writes: summaries, open questions, composing, translating and changing the page. Voice, hands-free conversation, reading aloud and podcasts still need LiveKit. If WebGPU isn't available, or the model can't load, Docent says so and doesn't fall back to LiveKit, so your page text stays on your computer.
+
+Expect it to be slower and less accurate than the cloud models, and to state things that aren't true with confidence. The model is under Liquid AI's [LFM Open License](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX/blob/main/LICENSE), which doesn't cover commercial use by organizations with $10 million or more in annual revenue.
 
 ## Example commands
 

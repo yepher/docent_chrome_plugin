@@ -319,26 +319,30 @@ function wavBlob(pcm, rate) {
   return new Blob([h.buffer, pcm.buffer], { type: "audio/wav" });
 }
 
-// ---------- Laya: the in-browser decision model runs in a worker (laya-worker.js) ----------
-let layaWorker = null, layaSeq = 0;
-const layaPending = new Map();
-function layaCall(msg) {
-  if (!layaWorker) {
-    layaWorker = new Worker("laya-worker.js", { type: "module" });
-    layaWorker.onmessage = (ev) => {
-      const m = ev.data || {};
-      if (m.type === "progress") chrome.runtime.sendMessage({ type: "laya:progress", text: m.text, frac: m.frac }).catch(() => {});
-      else if (m.type === "result") { const p = layaPending.get(m.id); layaPending.delete(m.id); p?.(m); }
-    };
-    layaWorker.onerror = (e) => {
-      for (const p of layaPending.values()) p({ error: `The Laya worker failed${e.message ? `: ${e.message}` : ""}.` });
-      layaPending.clear();
-      layaWorker = null;
-    };
-  }
-  const id = ++layaSeq;
-  return new Promise((resolve) => { layaPending.set(id, resolve); layaWorker.postMessage({ ...msg, id }); });
+// ---------- models that run in the browser, each in a worker (laya-worker.js, lfm-worker.js) ----------
+function modelWorker(file, prefix, name) {
+  let worker = null, seq = 0;
+  const pending = new Map();
+  return (msg) => {
+    if (!worker) {
+      worker = new Worker(file, { type: "module" });
+      worker.onmessage = (ev) => {
+        const m = ev.data || {};
+        if (m.type === "progress") chrome.runtime.sendMessage({ type: `${prefix}:progress`, text: m.text, frac: m.frac }).catch(() => {});
+        else if (m.type === "delta") chrome.runtime.sendMessage({ type: `${prefix}:delta`, reqId: m.reqId, text: m.text }).catch(() => {});
+        else if (m.type === "result") { const p = pending.get(m.id); pending.delete(m.id); p?.(m); }
+      };
+      worker.onerror = (e) => {
+        for (const p of pending.values()) p({ error: `The ${name} worker failed${e.message ? `: ${e.message}` : ""}.` });
+        pending.clear();
+        worker = null;
+      };
+    }
+    const id = ++seq;
+    return new Promise((resolve) => { pending.set(id, resolve); worker.postMessage({ ...msg, id }); });
+  };
 }
+const modelCalls = { laya: modelWorker("laya-worker.js", "laya", "Laya"), lfm: modelWorker("lfm-worker.js", "lfm", "LFM3-Omni") };
 
 // ---------- PDF: Chrome's PDF viewer can't be scripted, so read the file with pdf.js ----------
 let pdfjs = null;
@@ -464,9 +468,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     pdfExtract(msg).then(sendResponse, (e) => sendResponse({ error: e.message || String(e) }));
     return true;
   }
-  if (typeof msg.type === "string" && msg.type.startsWith("laya:")) {
+  const [model, call] = String(msg.type).split(":");
+  if (call && modelCalls[model]) {
     const { target, type, ...rest } = msg;
-    layaCall({ ...rest, type: type.slice(5) }).then(sendResponse);
+    modelCalls[model]({ ...rest, type: call }).then(sendResponse);
     return true;
   }
   if (msg.type === "pod:export") {

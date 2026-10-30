@@ -76,8 +76,22 @@
       <select id="iconOpens"><option value="popup">Popup</option><option value="panel">Side panel</option></select>
     </label>
 
-    <h2>Text model (LiveKit Inference) <span class="optional">optional</span></h2>
+    <h2>Text model <span class="optional">optional</span></h2>
     <p class="help">Writes text that isn't in your prompt (replies, messages) and answers open questions like "summarize this page".</p>
+    <label>Runs on
+      <select id="textProvider">
+        <option value="livekit">LiveKit Inference (cloud)</option>
+        <option value="lfm">This computer (LFM3-Omni, GPU required)</option>
+      </select>
+    </label>
+    <div id="lfmFields" hidden>
+      <p class="help">LFM3-Omni runs on your GPU: no key, and page text never leaves the browser. It downloads once (1.4 GB, cached afterwards) and is slower and less accurate than the cloud models, so check what it writes. Voice and podcasts still need the LiveKit key below.</p>
+      <div class="row">
+        <button type="button" id="lfmLoadBtn" class="secondary small">Download &amp; load now</button>
+        <button type="button" id="lfmClearBtn" class="secondary small" title="Delete the downloaded model from this browser">Delete download</button>
+      </div>
+      <p id="lfmStatus" class="help"></p>
+    </div>
     <p class="help">Find your URL, API key and secret in <a href="https://cloud.livekit.io/projects/p_/settings/keys" target="_blank" rel="noopener">LiveKit Cloud → Settings → API keys</a> (sign in, then <em>Create key</em>). No account yet? <a href="https://cloud.livekit.io/" target="_blank" rel="noopener">Sign up for LiveKit Cloud</a>.</p>
     <label>LiveKit URL
       <input id="lkUrl" type="text" placeholder="wss://your-project.livekit.cloud" autocomplete="off" />
@@ -86,14 +100,14 @@
       <label>API key <input id="lkApiKey" type="text" placeholder="API…" autocomplete="off" /></label>
       <label>API secret <input id="lkApiSecret" type="password" autocomplete="off" /></label>
     </div>
-    <label>Model
+    <label id="lkModelField">Model
       <div class="row tight">
         <select id="lkModel"></select>
         <button type="button" id="lkRefresh" class="secondary small" title="Load the model list from LiveKit">↻</button>
       </div>
       <input id="lkModelCustom" type="text" placeholder="provider/model, e.g. openai/gpt-4.1-mini" autocomplete="off" hidden />
     </label>
-    <details>
+    <details id="lkAdvanced">
       <summary>Advanced</summary>
       <label>Inference URL override <input id="lkInferenceUrl" type="text" placeholder="https://agent-gateway.livekit.cloud/v1" /></label>
     </details>
