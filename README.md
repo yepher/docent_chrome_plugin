@@ -71,7 +71,7 @@ Both keys are stored in `chrome.storage.local`, which isn't encrypted, so use a 
 
 ## Run the text model on your computer (optional)
 
-Instead of LiveKit Inference, the text model can be [LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX), which runs on your GPU with WebGPU. There's no key, and page text never leaves the browser.
+Instead of LiveKit Inference, the text model can be [LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX), which runs on your GPU with WebGPU. There's no key, and what the text model reads and writes stays in your browser.
 
 1. In ⚙ → *Text model*, set *Runs on* to **This computer**.
 2. Click **Download & load now**. The model downloads once (1.4 GB) and is cached in the browser. *Delete download* removes it.
@@ -79,7 +79,12 @@ Instead of LiveKit Inference, the text model can be [LFM3-Omni-2B](https://huggi
 
 When you choose *This computer*, Docent checks your GPU, memory and disk space before downloading anything. If the model can't run, Settings says why and what to try, and *Download & load now* is turned off. It needs a GPU with WebGPU and `shader-f16` support, and at least 6 GB of memory (8 GB or more is better).
 
-It covers everything the text model writes: summaries, open questions, composing, translating and changing the page. Voice, hands-free conversation, reading aloud and podcasts still need LiveKit. If WebGPU isn't available, or the model can't load, Docent says so and doesn't fall back to LiveKit, so your page text stays on your computer.
+It covers everything the text model writes: summaries, open questions, composing, translating and changing the page. If WebGPU isn't available, or the model can't load, Docent says so and doesn't fall back to LiveKit.
+
+It only replaces the text model, so two things can still leave your computer:
+
+- **Speech always uses LiveKit.** Docent has no on-device text-to-speech or speech-to-text, whichever text model you pick. Without a LiveKit key, voice, hands-free conversation, reading aloud and podcasts are off. With one, your voice and everything Docent says, including page text it reads aloud, goes to LiveKit. In Settings, the LiveKit key moves to the *Voice* section when you choose *This computer*.
+- **Jev still sends page details to TypeSafe.** Choose Laya as the decision model to keep those on your computer too.
 
 Expect it to be slower and less accurate than the cloud models, and to state things that aren't true with confidence. The model is under Liquid AI's [LFM Open License](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX/blob/main/LICENSE), which doesn't cover commercial use by organizations with $10 million or more in annual revenue.
 

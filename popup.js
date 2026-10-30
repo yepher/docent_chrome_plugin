@@ -168,9 +168,19 @@ function showTextProvider() {
   $("lfmFields").hidden = !lfm;
   $("lkModelField").hidden = lfm;
   $("lkAdvanced").hidden = lfm;
+  // LiveKit is only for speech now, so its key belongs with Voice.
+  $(lfm ? "lkAccountVoice" : "lkAccountText").append($("lkAccount"));
+  $("voiceHint").textContent = lfm ? "optional, cloud" : "uses the LiveKit key above";
+  $("voiceLocalNote").hidden = !lfm;
+  showVoiceFields();
   if (lfm) refreshLfm();
 }
+function showVoiceFields() {
+  const key = { lkApiKey: $("lkApiKey").value.trim(), lkApiSecret: $("lkApiSecret").value.trim(), lkUrl: $("lkUrl").value.trim(), lkInferenceUrl: $("lkInferenceUrl").value.trim() };
+  $("voiceFields").hidden = isLfm({ textProvider: $("textProvider").value }) && !lkConfigured(key);
+}
 $("textProvider").onchange = showTextProvider;
+for (const id of ["lkUrl", "lkApiKey", "lkApiSecret"]) $(id).oninput = showVoiceFields;
 function lfmText(text, cls = "") { $("lfmStatus").textContent = text; $("lfmStatus").className = "help " + cls; }
 async function refreshLfm() {
   const check = await lfmCheck().catch((e) => ({ ok: false, problems: [e.message], warnings: [], summary: "" }));

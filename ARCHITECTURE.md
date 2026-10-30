@@ -132,6 +132,7 @@ In ⚙ → *Text model*, *Runs on* picks where it runs. `chat()` in `lk.js` is t
 - **It needs its own ONNX Runtime.** `vendor/lfm/` holds the 1.31.1 WebGPU build, because the 1.30 build in `vendor/laya/` can't load this graph. There's no CPU fallback.
 - **Page text can't act as control tokens.** The tokenizer turns `<|im_end|>` written in a page into the real token, so `<|` is broken up in every message before tokenizing.
 - **No silent fallback.** If it can't load, the run stops with the reason rather than sending page text to LiveKit.
+- **Text only.** Speech always uses LiveKit, so what Docent says (including page text it reads aloud) and your voice still go there if a key is set. Jev also still sends page details to TypeSafe. Only Laya plus LFM3-Omni, with no LiveKit key, keeps everything in the browser. Settings moves the LiveKit key to the *Voice* section and hides the voice options until a key is entered.
 - **Requests run one at a time**, so the four parallel translation batches take turns. Prompts are limited to 32,000 tokens.
 
 Measured on an Apple M4 with 16 GB of memory: a 16,000-character page (about 3,000 tokens) takes about 5 seconds to read, then the answer comes at about 29 tokens a second. The caches stay on the GPU between steps, which tripled that speed.
