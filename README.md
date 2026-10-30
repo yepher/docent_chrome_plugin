@@ -77,6 +77,8 @@ Instead of LiveKit Inference, the text model can be [LFM3-Omni-2B](https://huggi
 2. Click **Download & load now**. The model downloads once (1.4 GB) and is cached in the browser. *Delete download* removes it.
 3. Click **Test text model**, then **Save**.
 
+When you choose *This computer*, Docent checks your GPU, memory and disk space before downloading anything. If the model can't run, Settings says why and what to try, and *Download & load now* is turned off. It needs a GPU with WebGPU and `shader-f16` support, and at least 6 GB of memory (8 GB or more is better).
+
 It covers everything the text model writes: summaries, open questions, composing, translating and changing the page. Voice, hands-free conversation, reading aloud and podcasts still need LiveKit. If WebGPU isn't available, or the model can't load, Docent says so and doesn't fall back to LiveKit, so your page text stays on your computer.
 
 Expect it to be slower and less accurate than the cloud models, and to state things that aren't true with confidence. The model is under Liquid AI's [LFM Open License](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX/blob/main/LICENSE), which doesn't cover commercial use by organizations with $10 million or more in annual revenue.

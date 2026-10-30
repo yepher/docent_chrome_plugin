@@ -1,5 +1,5 @@
 import { listModels, chat, KNOWN_MODELS, DEFAULT_MODEL, lkConfigured, textReady, textModelName, isLfm } from "./lk.js";
-import { lfmLoad, lfmStatus, lfmClear } from "./lfm.js";
+import { lfmLoad, lfmStatus, lfmClear, lfmCheck } from "./lfm.js";
 import { SUGGESTED_VOICES, STT_MODELS, DEFAULT_VOICE, DEFAULT_STT } from "./voice.js";
 
 const $ = (id) => document.getElementById(id);
@@ -147,6 +147,10 @@ $("lkRefresh").onclick = async () => {
 $("lkTest").onclick = async () => {
   const s = readForm();
   if (!textReady(s)) return lkStatus("Enter the LiveKit URL, key and secret first.", "err");
+  if (isLfm(s)) {
+    const check = await lfmCheck().catch((e) => ({ ok: false, problems: [e.message] }));
+    if (!check.ok) return lkStatus(check.problems.join(" "), "err");
+  }
   const name = textModelName(s);
   lkStatus(`Asking ${name}…`);
   const t0 = performance.now();
@@ -169,9 +173,13 @@ function showTextProvider() {
 $("textProvider").onchange = showTextProvider;
 function lfmText(text, cls = "") { $("lfmStatus").textContent = text; $("lfmStatus").className = "help " + cls; }
 async function refreshLfm() {
+  const check = await lfmCheck().catch((e) => ({ ok: false, problems: [e.message], warnings: [], summary: "" }));
+  $("lfmHardware").textContent = check.summary;
+  $("lfmLoadBtn").disabled = !check.ok;
+  if (!check.ok) return lfmText(`This computer can't run LFM3-Omni. ${check.problems.join(" ")}`, "err");
   const st = await lfmStatus().catch(() => null);
   if (st?.info) lfmText("Loaded on the GPU.", "ok");
-  else if (!st?.loading) lfmText("Not loaded yet. It loads automatically the first time it's needed, or press Download & load now.");
+  else if (!st?.loading) lfmText(`Not loaded yet. It loads automatically the first time it's needed, or press Download & load now. ${check.warnings.join(" ")}`.trim());
 }
 $("lfmLoadBtn").onclick = async () => {
   $("lfmLoadBtn").disabled = true;
@@ -187,6 +195,7 @@ $("lfmLoadBtn").onclick = async () => {
 $("lfmClearBtn").onclick = async () => {
   try {
     const r = await lfmClear();
+    await refreshLfm();
     lfmText(`Deleted the downloaded model (${r.cleared || 0} cache${r.cleared === 1 ? "" : "s"}).`);
   } catch (e) {
     lfmText(e.message, "err");

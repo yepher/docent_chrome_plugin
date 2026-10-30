@@ -8,6 +8,7 @@
 
 import * as ort from "./vendor/lfm/ort.webgpu.min.mjs";
 import { Tokenizer } from "./vendor/laya/tokenizers.min.mjs";
+import { assess } from "./lfm-check.js";
 
 const REVISION = "7d6bd3fd59a0622e5ce7fefc141145a8bba1435a";
 const BASE = `https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX/resolve/${REVISION}/`;
@@ -60,10 +61,31 @@ async function fetchWeights(cache) {
   return out;
 }
 
+// What the GPU and disk can do. A finished download needs no more space.
+async function hardware() {
+  const webgpu = !!self.navigator.gpu;
+  const adapter = await self.navigator.gpu?.requestAdapter().catch(() => null);
+  const gpu = adapter?.info;
+  const left = await (async () => {
+    if (!(await caches.has(CACHE))) return WEIGHTS_SIZE;
+    const parts = (await (await caches.open(CACHE)).keys()).filter((r) => r.url.includes("?part=")).length;
+    return Math.max(0, WEIGHTS_SIZE - parts * PART_SIZE);
+  })().catch(() => WEIGHTS_SIZE);
+  const { quota, usage } = await self.navigator.storage.estimate().catch(() => ({}));
+  return {
+    webgpu, adapter: !!adapter,
+    software: !!gpu?.isFallbackAdapter || /swiftshader|llvmpipe|software/i.test(`${gpu?.description} ${gpu?.architecture}`),
+    vendor: gpu?.vendor, architecture: gpu?.architecture, description: gpu?.description,
+    shaderF16: !!adapter?.features.has("shader-f16"),
+    maxBufferSize: adapter?.limits.maxBufferSize, maxStorageBufferBindingSize: adapter?.limits.maxStorageBufferBindingSize,
+    freeBytes: quota == null ? null : quota - usage, neededBytes: left,
+  };
+}
+
 async function load() {
   if (session) return info;
-  const adapter = await self.navigator.gpu?.requestAdapter().catch(() => null);
-  if (!adapter) throw new Error("LFM3-Omni needs WebGPU, which isn't available in this browser.");
+  const check = assess(await hardware());
+  if (!check.ok) throw new Error(check.problems.join(" "));
 
   const t0 = performance.now();
   ort.env.wasm.wasmPaths = new URL("./vendor/lfm/", self.location.href).href;
@@ -81,7 +103,7 @@ async function load() {
     graphOptimizationLevel: "disabled",
     preferredOutputLocation: "gpu-buffer", // the caches stay on the GPU between steps
     externalData: [{ path: WEIGHTS, data }],
-  });
+  }).catch((e) => { throw new Error(`LFM3-Omni couldn't start on this GPU, which may not have enough memory free (${e.message || e}).`); });
   info = { sizeMB: mb(WEIGHTS_SIZE), loadMs: Math.round(performance.now() - t0) };
   progress("LFM3-Omni ready.", 1);
   return info;
@@ -198,6 +220,8 @@ self.onmessage = (ev) => {
   } else if (m.type === "abort") {
     aborted.add(m.reqId);
     post({ type: "result", id: m.id, ok: true });
+  } else if (m.type === "hardware") {
+    hardware().then((facts) => post({ type: "result", id: m.id, facts }), (e) => post({ type: "result", id: m.id, error: e.message || String(e) }));
   } else if (m.type === "status") {
     post({ type: "result", id: m.id, info, loading: !!loading });
   } else if (m.type === "clear") {

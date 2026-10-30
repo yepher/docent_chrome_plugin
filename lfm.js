@@ -2,6 +2,7 @@
 // document), as an alternative to LiveKit Inference. Works in the service worker and the popup.
 
 import { ensureOffscreen } from "./offscreen-doc.js";
+import { assess } from "./lfm-check.js";
 
 export const LFM_NAME = "LFM3-Omni-2B";
 
@@ -12,7 +13,17 @@ async function toLfm(msg) {
   if (res.error) throw new Error(res.error);
   return res;
 }
-export const lfmLoad = async () => (await toLfm({ type: "lfm:load" })).info;
+// Can this computer run it? { ok, problems, warnings, summary }
+export async function lfmCheck() {
+  const { facts } = await toLfm({ type: "lfm:hardware" });
+  const [cpu, memory] = await Promise.all([chrome.system?.cpu?.getInfo().catch(() => null), chrome.system?.memory?.getInfo().catch(() => null)]);
+  return assess({ ...facts, cpuModel: cpu?.modelName, cpuCores: cpu?.numOfProcessors, memoryBytes: memory?.capacity });
+}
+export async function lfmLoad() {
+  const check = await lfmCheck();
+  if (!check.ok) throw new Error(check.problems.join(" "));
+  return (await toLfm({ type: "lfm:load" })).info;
+}
 export const lfmStatus = () => toLfm({ type: "lfm:status" });
 export const lfmClear = () => toLfm({ type: "lfm:clear" });
 

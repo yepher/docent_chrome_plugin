@@ -127,6 +127,7 @@ In ⚙ → *Text model*, *Runs on* picks where it runs. `chat()` in `lk.js` is t
 
 [LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-ONNX) runs in a module worker (`lfm-worker.js`) started by the offscreen document, the same way as Laya, and streams tokens back as `lfm:delta` messages that `lfm.js` turns into `chat()`'s `onDelta`.
 
+- **It checks first.** `lfm-check.js` turns what the browser reports into reasons a person can act on, before anything is downloaded: WebGPU, a real (not software) GPU, `shader-f16`, the buffer limits and disk space from the worker, plus the CPU and memory from `chrome.system`. The GPU rules are measured from the decoder. Memory is a judgment call, because WebGPU doesn't report GPU memory: under 6 GB is refused and under 10 GB gets a warning.
 - **Only the text decoder is used** (`decoder_q4f16`, 1.4 GB), so the vision, audio and speech graphs aren't downloaded. The download is pinned to one model revision and cached in 64 MB parts, so an interrupted download resumes.
 - **It needs its own ONNX Runtime.** `vendor/lfm/` holds the 1.31.1 WebGPU build, because the 1.30 build in `vendor/laya/` can't load this graph. There's no CPU fallback.
 - **Page text can't act as control tokens.** The tokenizer turns `<|im_end|>` written in a page into the real token, so `<|` is broken up in every message before tokenizing.
@@ -279,6 +280,7 @@ The agent runs in the background service worker, so you can close the popup; reo
 | `decider.js` | Jev or Laya: routes typed questions to the TypeSafe API or the in-browser model, and adapts them for Laya |
 | `laya-worker.js` | Laya in a module worker: download and cache the model, pick WebGPU or CPU, answer questions |
 | `lfm.js` | The LFM3-Omni text model: `chat()`-shaped client for the worker, load, status and delete |
+| `lfm-check.js` | Decides whether this computer can run LFM3-Omni, and explains why not |
 | `lfm-worker.js` | LFM3-Omni in a module worker: download and cache the decoder, build the prompt, generate on WebGPU |
 | `offscreen-doc.js` | Creates the offscreen document on demand |
 | `vendor/laya/` | ONNX Runtime Web 1.30 (MIT), tokenizers.js (MIT) and layaForWeb's `laya-core.js` (Apache-2.0), with their licences and notice |

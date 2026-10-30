@@ -36,7 +36,9 @@
     "cookies",
     "declarativeNetRequest",
     "downloads",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "system.cpu",
+    "system.memory"
   ],
   "host_permissions": [
     "<all_urls>"
